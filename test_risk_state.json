@@ -1,0 +1,19 @@
+{
+  "date": "2025-10-25",
+  "day_open_equity": 100000.0,
+  "realized_pnl_today": 50.0,
+  "consecutive_losses": 1,
+  "last_trade_ts": {
+    "BTC-USDT": 1761395725
+  },
+  "symbol_exposure": {
+    "BTC-USDT": 5000.0
+  },
+  "open_positions": {
+    "BTC-USDT": {
+      "side": "buy",
+      "qty": 0.2,
+      "avg_price": 50000.0
+    }
+  }
+}

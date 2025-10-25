@@ -3,12 +3,13 @@
 import os, json, time, hashlib, pathlib
 from typing import Dict, Any, Tuple
 
-FLASK_BASE = os.getenv("FLASK_BASE_URL", "http://127.0.0.1:5000")
+FLASK_BASE = os.getenv("FLASK_BASE_URL", "http://127.0.0.1:5001")
 LOG_DIR = pathlib.Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 SIGNAL_LOG = LOG_DIR / "recent_signals.jsonl"
 TRADE_LOG  = LOG_DIR / "recent_trades.jsonl"
 IDEMP_FILE = LOG_DIR / "idempotency_keys.json"
+
 
 def _http_get(path: str) -> Dict[str, Any]:
     url = f"{FLASK_BASE}{path}"

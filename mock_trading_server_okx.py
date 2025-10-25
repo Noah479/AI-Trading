@@ -16,6 +16,61 @@ TRADE_LOG  = LOG_DIR / "recent_trades.jsonl"
 market_cache = {}
 last_update = 0
 
+_session = requests.Session()
+_session.headers.update({"User-Agent":"okx-bridge/1.0"})
+
+# --- 简单缓存，降低OKX频率 ---
+_cache = {"ts":0, "snap":{}, "candles":{}}
+CACHE_TTL_SNAPSHOT = 2     # 快照缓存2秒
+CACHE_TTL_CANDLES  = 10    # K线缓存10秒
+CANDLE_LIMIT = 200
+CANDLE_BAR   = "1m"
+
+def okx_get(path, params=None, timeout=5):
+    r = _session.get(OKX_API_BASE + path, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+def fetch_snapshot_once(instId):
+    """OKX Ticker快照（含 last / high24h / low24h）。"""
+    js = okx_get("/api/v5/market/ticker", {"instId":instId})
+    data = (js.get("data") or [{}])[0]
+    # OKX返回字符串，需要转float
+    last = float(data.get("last", "0") or 0.0)
+    high24h = float(data.get("high24h", "0") or 0.0)
+    low24h  = float(data.get("low24h", "0") or 0.0)
+    return {"last": last, "high24h": high24h, "low24h": low24h}
+
+def fetch_candles_once(instId, bar=CANDLE_BAR, limit=CANDLE_LIMIT):
+    """OKX 返回 [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]，按时间**倒序**。
+       我们需要**正序**+精简为 [open, high, low, close, volume]。
+    """
+    js = okx_get("/api/v5/market/candles", {"instId":instId, "bar":bar, "limit":limit})
+    arr = js.get("data") or []
+    candles = []
+    for row in reversed(arr):  # 反转为从旧到新
+        # row: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        o = float(row[1]); h = float(row[2]); l = float(row[3]); c = float(row[4]); vol = float(row[5])
+        candles.append([o, h, l, c, vol])
+    return candles
+
+def fetch_snapshot_cached(instId):
+    now = time.time()
+    if now - _cache["ts"] > CACHE_TTL_SNAPSHOT:
+        _cache["snap"].clear()
+        _cache["ts"] = now
+    if instId not in _cache["snap"]:
+        _cache["snap"][instId] = fetch_snapshot_once(instId)
+    return _cache["snap"][instId]
+
+def fetch_candles_cached(instId):
+    now = time.time()
+    key = f"{instId}:{CANDLE_BAR}:{CANDLE_LIMIT}"
+    if key not in _cache["candles"] or (now - _cache["candles"][key]["ts"] > CACHE_TTL_CANDLES):
+        cds = fetch_candles_once(instId)
+        _cache["candles"][key] = {"ts":now, "data":cds}
+    return _cache["candles"][key]["data"]
+
 # ==============================
 # 签名与请求头生成
 # ==============================
@@ -41,6 +96,8 @@ def okx_headers(method, request_path, body=""):
         "Content-Type": "application/json",
         "x-simulated-trading": "1"
     }
+
+
 
 # ==============================
 # 异步行情更新线程
@@ -90,16 +147,36 @@ def recent_trades():
     limit = int(request.args.get("limit", 50))
     return jsonify({"items": _tail_jsonl(TRADE_LOG, limit)})
 
+# === AI 状态 JSON ===
+@app.get("/ai/status")
+def ai_status_json():
+    try:
+        path = LOG_DIR / "ai_status.json"
+        if not path.exists():
+            return jsonify({"status":"empty","message":"ai_status.json not found"}), 200
+        return jsonify(json.loads(path.read_text(encoding="utf-8")))
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
 
-@app.route("/market", methods=["GET"])
-def get_market():
-    """读取缓存行情"""
-    age = round(time.time() - last_update, 2)
-    return jsonify({
-        "age_seconds": age,
-        "updated_at": last_update,
-        "data": market_cache
-    })
+# === AI 状态页面 ===
+@app.get("/ai")
+def ai_status_page():
+    return render_template("ai_status.html")
+
+@app.get("/market")
+def market():
+    out = {"data": {}}
+    for sym in SYMBOLS:
+        snap = fetch_snapshot_cached(sym)
+        cds  = fetch_candles_cached(sym)  # ← ★ 新增：把K线合并回去
+        out["data"][sym] = {
+            "price": snap["last"],
+            "last":  snap["last"],
+            "high24h": snap["high24h"],
+            "low24h":  snap["low24h"],
+            "candles": cds
+        }
+    return jsonify(out)
 
 @app.route("/dashboard")
 def dashboard():

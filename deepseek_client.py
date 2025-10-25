@@ -1,174 +1,483 @@
 # -*- coding: utf-8 -*-
-# DeepSeek 决策客户端（严格 JSON + 回退策略）
+# DeepSeek 决策客户端 (Hybrid): 稳健HTTP/解析 + 中文严格JSON Prompt + 多层回退
 import os, json, time, re
 from datetime import datetime, timezone
+from config import DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL
 
-_DEEPSEEK_BASE = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-_DEEPSEEK_MODEL_PRIMARY = os.getenv("DEEPSEEK_MODEL_PRIMARY", "deepseek-reasoner")
-_DEEPSEEK_MODEL_FALLBACK = os.getenv("DEEPSEEK_MODEL_FALLBACK", "deepseek-chat")
-_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-8ba30dbdcb814f75b3ba6141ab220163")
+# === 环境变量 ===
+DEEPSEEK_API_KEY   = DEEPSEEK_API_KEY
+DEEPSEEK_API_BASE  = DEEPSEEK_API_BASE
+MODEL_PRIMARY      = DEEPSEEK_MODEL
 
-# --- HTTP helper: prefer requests, fallback to urllib ---
-def _http_post_json(url, headers, payload, timeout=30):
+
+
+# === HTTP 辅助：requests 优先，失败回退 urllib ===
+def _http_post_json(url, headers, payload, timeout=60):
     try:
         import requests
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        # 调试输出
+        print(f"[DeepSeek] POST {url} -> HTTP {r.status_code}, len={len(r.text or '')}")
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        # fallback
-        import urllib.request
-        import urllib.error
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                     headers=headers | {"Content-Type": "application/json"},
-                                     method="POST")
+        # fallback 到 urllib
+        import urllib.request, urllib.error
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST"
+        )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                body = resp.read().decode("utf-8")
+                print(f"[DeepSeek:urllib] HTTP 200, len={len(body)}")
+                return json.loads(body)
         except urllib.error.HTTPError as he:
             body = he.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"HTTPError {he.code}: {body}") from he
         except Exception as e2:
             raise
 
-def _extract_json_maybe(s: str):
-    """从文本中提取最大 JSON 块；若失败返回 None"""
-    if not s:
+
+# === 解析 deepseek 响应为 JSON：支持 reasoning_content / content ===
+
+def _parse_content_to_json(resp: dict):
+    """
+    解析 deepseek-reasoner/chat 的响应：
+    - 优先读取 message.content（最终答案）
+    - 次优读取 message.reasoning_content（推理过程）
+    - 过滤 <think> 块
+    - 直接 json.loads；失败则用正则提取最外层 { ... } 再解析
+    """
+    try:
+        choice = (resp.get("choices") or [{}])[0]
+        message = choice.get("message", {}) or {}
+
+        # ✅ 关键：先读 content（最终输出），再读 reasoning_content（解释）
+        content_final = message.get("content") or ""
+        content_reason = message.get("reasoning_content") or ""
+
+        # 打印两者长度，便于诊断
+        print(f"[DeepSeek] message keys={list(message.keys())}, content_len={len(content_final)}, reasoning_len={len(content_reason)}")
+
+        raw = content_final if content_final else content_reason
+        if not raw:
+            return None
+
+        # 去除 <think> 思维链块
+        if "<think>" in raw:
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.S)
+
+        raw = raw.strip()
+        if not raw:
+            return None
+
+        # 先直解析
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # 再尝试提取 JSON 块
+            m = re.search(r"\{[\s\S]*\}", raw)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except Exception:
+                    return None
         return None
-    # 贪婪匹配最大 {...} 或 [...]
-    for pat in (r'\{.*\}', r'\[.*\]'):
-        m = re.search(pat, s, re.S)
-        if m:
-            txt = m.group(0)
-            try:
-                return json.loads(txt)
-            except Exception:
-                continue
-    return None
+    except Exception as e:
+        print("[DeepSeek] parse error:", e)
+        return None
 
-def build_messages(market_snapshot: dict, balance_snapshot: dict,
-                   recent_trades: list | None, constraints: dict) -> list[dict]:
-    # system
-    system = (
-        "You are an AI quant trader. "
-        "Output STRICT JSON ONLY (no code fences, no explanations), "
-        "conforming to the provided schema. Put the final JSON in `content`."
+
+
+def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_trades=None):
+    """
+    构建带技术指标与量化约束的 Prompt
+    """
+    symbols = (constraints or {}).get("symbols") or list(market.keys())
+    snapshot = {}
+    for sym in symbols:
+        row = market.get(sym) or {}
+        last = row.get("price") or row.get("last")
+        hi   = row.get("high") or row.get("high24h")
+        lo   = row.get("low")  or row.get("low24h")
+        try:
+            last = float(last) if last is not None else None
+            hi   = float(hi) if hi is not None else None
+            lo   = float(lo) if lo is not None else None
+        except Exception:
+            last = hi = lo = None
+        vol24 = (hi - lo) / last if last and hi and lo and last > 0 else None
+        snapshot[sym] = {"last": last, "high24h": hi, "low24h": lo, "vol24": vol24}
+
+    system_prompt = (
+        "你是一名专业量化交易AI。请在给定账户信息、市场快照与技术指标下，为“最有潜力”的**单一**交易对生成**严格JSON**决策。\n"
+        "\n"
+        "【硬性格式要求】\n"
+        "1) 只在最终 **message.content** 输出完整JSON，禁止在 reasoning_content 输出；禁止任何解释文字、注释或多余字符。\n"
+        "2) JSON 架构：\n"
+        "   {\"version\":\"1.0\",\"decision\":{\n"
+        "      \"symbol\":\"<符号>\",\n"
+        "      \"side\":\"buy|sell|hold\",\n"
+        "      \"order_type\":\"market|limit\",\n"
+        "      \"max_slippage_bps\":<int>,\n"
+        "      \"risk\":{\"stop_loss_pct\":<float>,\"take_profit_pct\":<float>},\n"
+        "      \"confidence\":<0..1 的小数>,\n"
+        "      \"rationale\":\"≤30字中文理由\"\n"
+        "   },\"ts\":\"ISO-8601\"}\n"
+        "3) 仅输出一个 symbol；所有数值必须是裸数（不带单位/百分号/区间）。\n"
+        "4) 若无法确定方向，按 BTC-USDT 给出 hold（安全回退）。\n"
+        "\n"
+        "【可用输入说明】\n"
+        "- market_snapshot[sym]: last / high24h / low24h（可能缺失）；\n"
+        "- technical_indicators[sym]（可能部分缺失）：ema_fast, ema_slow, rsi14, atr14, macd, macd_signal, adx14, boll_upper, boll_mid, boll_lower；\n"
+        "- constraints.risk_limits.max_slippage_bps（上限），constraints.symbols（允许交易列表），symbol_rules（精度/步长）。\n"
+        "\n"
+        "【计算辅助量】（缺失则跳过或取安全默认）\n"
+        "- pos24 = (last - low24h) / max(1e-9, high24h - low24h)，缺失用 0.5；\n"
+        "- atr_pct = atr14 / last（波动率，缺失用 0.02 进行保守估算）。\n"
+        "\n"
+        "【多因子打分（选一只最高分）】\n"
+        "A. 趋势因子（基础）：\n"
+        "   - ema_fast > ema_slow: +2；ema_fast < ema_slow: -2；\n"
+        "   - last > ema_slow: +1；last < ema_slow: -1。\n"
+        "B. 动能因子（RSI）：\n"
+        "   - rsi14 ≥ 70: -1（短线回调风险）；\n"
+        "   - 55 ≤ rsi14 < 70: +1；\n"
+        "   - 40 ≤ rsi14 < 55: 0；\n"
+        "   - 30 ≤ rsi14 < 40: -0.5（动能偏弱）；\n"
+        "   - rsi14 < 30: +1（超卖反弹，但需趋势配合）。\n"
+        "C. MACD 因子：\n"
+        "   - macd > macd_signal: +1；macd < macd_signal: -1；\n"
+        "   - 若出现“上穿/下穿”（由符号变化近因判断）：金叉 +3，死叉 -3。\n"
+        "D. 趋势强度（ADX）：\n"
+        "   - adx14 > 30: 将(趋势因子 + MACD因子)×1.3；\n"
+        "   - 20 < adx14 ≤ 30: ×1.0；\n"
+        "   - adx14 ≤ 20: ×0.5（震荡，削弱趋势信号）。\n"
+        "E. 布林带（BOLL）辅助：\n"
+        "   - last ≥ boll_upper: -1（超买），若 adx14>30 且 macd>signal 则改为 0；\n"
+        "   - last ≤ boll_lower: +1（超卖），若 macd<signal 则改为 0。\n"
+        "F. 风险/环境惩罚：\n"
+        "   - atr_pct > 0.05: -1； 0.03 < atr_pct ≤ 0.05: -0.5；\n"
+        "   - pos24<0.1 或 pos24>0.9：±0.5（极端位置适度惩罚）。\n"
+        "\n"
+        "【信号生成（阈值与冲突消解）】\n"
+        "- 记总分为 Score：\n"
+        "  • 若 Score ≥ +2 且 (adx14>20 或 出现金叉)：side=buy；\n"
+        "  • 若 Score ≤ -2 且 (adx14>20 或 出现死叉)：side=sell；\n"
+        "  • 否则 side=hold。\n"
+        "- 若 RSI、MACD 与 EMA 结论冲突：以(趋势因子+MACD因子)为主，RSI 仅作强弱修正；ADX≤20 优先观望。\n"
+        "- 多品种并列：优先 ADX 高者；若相同，选 atr_pct 更小（风险更低）；再相同选 BTC-USDT。\n"
+        "\n"
+        "【风控与参数映射】\n"
+        "- order_type：默认 \"market\"；max_slippage_bps = min(15, constraints.risk_limits.max_slippage_bps 或默认值)。\n"
+        "- 止损/止盈：\n"
+        "  sl = clip(0.8*atr_pct, 0.003, 0.050)；\n"
+        "  若 side≠hold：\n"
+        "    • 若 adx14>30：tp = clip(2.5*sl, 0.010, 0.100)；\n"
+        "    • 若 20<adx14≤30：tp = clip(2.0*sl, 0.010, 0.100)；\n"
+        "    • 若 adx14≤20：tp = clip(1.6*sl, 0.010, 0.100)；\n"
+        "  若 side=hold：sl=0.01，tp=0.02（占位）。\n"
+        "- confidence：\n"
+        "  • 基础：buy/sell=0.55，hold=0.50；\n"
+        "  • 每项强一致性(+EMA多头且MACD>signal；或 金叉/死叉；或 RSI处于[55,65]/[35,45]之外的强区间) +0.05；\n"
+        "  • 每项明显冲突 -0.05；adx14>30 +0.05；adx14≤18 -0.05；atr_pct>0.05 -0.05；\n"
+        "  • 结果四舍五入到小数点后2位，限制在[0,1]。\n"
+        "- rationale：用不超过30字的**中文**给出主因（如“MACD金叉+ADX走强”或“ADX<20震荡观望”）。\n"
+        "\n"
+        "【健壮性与回退】\n"
+        "- 指标缺失时仍需给出结论：用可用因子计算；若有效因子<2，则对 BTC-USDT 输出 hold（sl=0.01,tp=0.02,conf=0.50,rationale=\"数据不足，暂观望\"）。\n"
+        "- 所有字段必须填入具体数值；不得输出“N/A”“—”“约”等模糊内容。\n"
+        "- 仅使用 constraints.symbols 中的交易对；若输入不在列表内，默认 BTC-USDT。\n"
+        "\n"
+        "【最终提醒】\n"
+        "- 只输出**一个**严格JSON对象到 content；不得额外输出任何文字。\n"
     )
-    # user
-    user_lines = [
-        "json",
-        "CONTEXT:",
-        f"- market snapshot: {json.dumps(market_snapshot, ensure_ascii=False)}",
-        f"- account balance: {json.dumps(balance_snapshot, ensure_ascii=False)}",
-        f"- recent trades: {json.dumps(recent_trades or [], ensure_ascii=False)}",
-        "CONSTRAINTS:",
-        f"- tradable symbols: {json.dumps(constraints.get('symbols', []), ensure_ascii=False)}",
-        f"- lot/price rules: {json.dumps(constraints.get('symbol_rules', {}), ensure_ascii=False)}",
-        f"- defaults: {json.dumps(constraints.get('defaults', {}), ensure_ascii=False)}",
-        "REQUIRED JSON OUTPUT EXAMPLE:",
-        json.dumps({
-            "version": "1.0",
-            "decision": {
-                "symbol": "BTC-USDT", "side": "buy", "order_type": "market",
-                "size": 0.001, "limit_price": None, "max_slippage_bps": 10,
-                "risk": {"stop_loss_pct": 0.01, "take_profit_pct": 0.02},
-                "confidence": 0.75, "reason": "..."
+
+    # 技术指标输入
+    indicators = {}
+    for sym in symbols:
+        row = market.get(sym) or {}
+        indicators[sym] = {
+            # 趋势
+            "ema_fast": row.get("ema_fast"),
+            "ema_slow": row.get("ema_slow"),
+            # 动能
+            "rsi14": row.get("rsi14"),
+            # 波动
+            "atr14": row.get("atr14"),
+            # 趋势确认
+            "macd": row.get("macd"),
+            "macd_signal": row.get("macd_signal"),
+            # 趋势强度
+            "adx14": row.get("adx14"),
+            # 布林带
+            "boll_upper": row.get("boll_upper"),
+            "boll_mid": row.get("boll_mid"),
+            "boll_lower": row.get("boll_lower"),
+        }
+
+    user_payload = {
+        "objective": "根据市场数据和技术指标，判断趋势方向，输出 buy/sell/hold。",
+        "account": {"equity_usdt": float(balance.get('USDT', {}).get('available', 0.0) or 0.0)},
+        "market_snapshot": snapshot,
+        "technical_indicators": indicators,
+        "constraints": {
+            "symbols": symbols,
+            "symbol_rules": (constraints or {}).get("symbol_rules", {}),
+            "risk_limits": {"max_open_risk_pct": 0.03, "max_slippage_bps": 15},
+            "output_json_schema": {
+                "version": "1.0",
+                "decision": {
+                    "symbol": "BTC-USDT",
+                    "side": "buy|sell|hold",
+                    "order_type": "market|limit",
+                    "max_slippage_bps": "int",
+                    "risk": {"stop_loss_pct": "0.0~0.05", "take_profit_pct": "0.0~0.1"},
+                    "confidence": "0.0~1.0",
+                    "rationale": "≤30字简短理由"
+                },
+                "ts": "ISO-8601"
             },
-            "ts": datetime.now(timezone.utc).isoformat()
-        }, ensure_ascii=False)
-    ]
+            "format_rule": "仅输出严格 JSON；不要解释；不要思维链。"
+        }
+    }
+
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": "\n".join(user_lines)}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)}
     ]
 
-def _call_chat_completions(model: str, messages: list[dict],
-                           response_format_json: bool = True,
-                           max_tokens: int = 800, timeout: int = 30) -> dict:
-    url = f"{_DEEPSEEK_BASE}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {_API_KEY}",
-        "Content-Type": "application/json"
-    }
+def _call_chat(model: str, messages: list, json_mode=True, temperature=0.2, max_tokens=2000, timeout=60):
+    url = f"{DEEPSEEK_API_BASE}/chat/completions"
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": model,
         "messages": messages,
-        # deepseek-reasoner 支持 JSON Output；我们开启严格 JSON
-        "response_format": {"type": "json_object"} if response_format_json else {"type": "text"},
+        # 开启 JSON 强约束；fallback 时可尝试 text
+        "response_format": {"type": "json_object"} if json_mode else {"type": "text"},
+        "temperature": temperature,
         "max_tokens": max_tokens
     }
     return _http_post_json(url, headers, payload, timeout=timeout)
 
-def _parse_content_to_json(resp: dict) -> dict | None:
-    try:
-        content = resp["choices"][0]["message"]["content"]
-    except Exception:
-        return None
-    if not content:
-        return None
-    try:
-        return json.loads(content)
-    except Exception:
-        return _extract_json_maybe(content)
-
-def get_decision(market_snapshot: dict, balance_snapshot: dict,
-                 recent_trades: list | None, constraints: dict,
-                 retries: int = 2) -> tuple[dict | None, dict]:
+# === 主函数：与 ai_trader.py 对接 ===
+def get_decision(market: dict,
+                 balance: dict,
+                 recent_trades=None,
+                 constraints: dict=None,
+                 temperature: float=0.2):
     """
-    返回 (decision_json | None, meta)
-    meta 包含 model_used / raw_response / error
+    返回: (decision_dict, meta)
     """
-    messages = build_messages(market_snapshot, balance_snapshot, recent_trades, constraints)
+    ts = int(time.time())
+    messages = _build_messages_cn(market, balance, constraints or {}, recent_trades)
     meta = {"model_used": None, "raw_response": None, "error": None}
 
-    # 1) 主路径：deepseek-reasoner + JSON 严格模式
+    # 0) 关键环境检查
+    if not DEEPSEEK_API_KEY:
+        meta["error"] = "DEEPSEEK_API_KEY missing"
+        fallback = {
+            "version":"1.0",
+            "decision":{
+                "symbol": (list(market.keys()) or ["BTC-USDT"])[0],
+                "side":"hold","order_type":"market",
+                "max_slippage_bps":10,
+                "risk":{"stop_loss_pct":0.01,"take_profit_pct":0.02},
+                "confidence":0.5,
+                "rationale":"未配置API Key，暂不交易"
+            },
+            "ts": datetime.now(timezone.utc).isoformat()
+        }
+        return fallback, meta
+
+    # 1) 主模型：JSON模式
     try:
-        resp = _call_chat_completions(_DEEPSEEK_MODEL_PRIMARY, messages, True)
-        meta["model_used"] = _DEEPSEEK_MODEL_PRIMARY
-        meta["raw_response"] = resp
-        js = _parse_content_to_json(resp)
-        if js:
-            return js, meta
+        resp1 = _call_chat(MODEL_PRIMARY, messages, json_mode=True, temperature=temperature)
+        meta["model_used"] = MODEL_PRIMARY
+        meta["raw_response"] = resp1
+        
+        # ✅ 打印完整响应（调试用）
+        choice = (resp1.get("choices") or [{}])[0]
+        message = choice.get("message", {})
+        print(f"\n{'='*70}")
+        print(f"[DeepSeek 原始响应]")
+        print(f"  content: {message.get('content', '')[:200]}")
+        print(f"  reasoning_content: {message.get('reasoning_content', '')[:200]}")
+        print(f"{'='*70}\n")
+        
+        js1 = _parse_content_to_json(resp1)
+        if js1:
+            print("🧠 DeepSeek 原始输出(JSON):", str(js1)[:300])
+            
+            # ✅ 关键修改：捕获 normalize 异常
+            try:
+                decision = _normalize_decision(js1, market)
+                print("✅ 决策标准化成功")
+                return decision, meta
+            except Exception as norm_err:
+                print(f"❌ 决策标准化失败: {norm_err}")
+                meta["error"] = f"normalize error: {norm_err}"
+                # 继续到 fallback
+        else:
+            print("⚠️ DeepSeek 返回了数据但无法解析为 JSON")
+            meta["error"] = "parse failed: no valid JSON"
+            
     except Exception as e:
+        print(f"❌ DeepSeek API 调用失败: {e}")
         meta["error"] = f"primary error: {e}"
 
-    # 2) 重试（提示轻微改写）
-    if retries >= 1:
-        messages2 = messages.copy()
-        messages2[-1] = {
-            "role": "user",
-            "content": messages[-1]["content"] + "\nIMPORTANT: Return ONLY JSON strictly following the example."
-        }
-        try:
-            resp2 = _call_chat_completions(_DEEPSEEK_MODEL_PRIMARY, messages2, True)
-            meta["model_used"] = _DEEPSEEK_MODEL_PRIMARY
-            meta["raw_response"] = resp2
-            js2 = _parse_content_to_json(resp2)
-            if js2:
-                return js2, meta
-        except Exception as e2:
-            meta["error"] = f"retry error: {e2}"
 
-    # 3) 回退：deepseek-chat（JSON 模式）
+    # 全部失败：回退 HOLD
+    print("⚠️ 所有尝试失败，返回 HOLD 决策")
+    fallback = {
+        "version":"1.0",
+        "decision":{
+            "symbol": (list(market.keys()) or ["BTC-USDT"])[0],
+            "side":"hold","order_type":"market",
+            "max_slippage_bps":10,
+            "risk":{"stop_loss_pct":0.01,"take_profit_pct":0.02},
+            "confidence":0.5,
+            "rationale":"连接失败或解析异常，暂不交易"
+        },
+        "ts": datetime.now(timezone.utc).isoformat()
+    }
+    return fallback, meta
+
+def _coerce_side(x: str) -> str:
+    if not x:
+        return "hold"
+    sx = str(x).strip().lower()
+    if "|" in sx:     # 像 "buy|sell|hold" → 视为不确定
+        return "hold"
+    if sx in ("buy", "sell", "hold"):
+        return sx
+    # 尝试从字符串中抓信号词
+    if "buy" in sx and "sell" in sx:
+        return "hold"
+    if "buy" in sx:
+        return "buy"
+    if "sell" in sx:
+        return "sell"
+    return "hold"
+
+def _coerce_order_type(x: str) -> str:
+    if not x:
+        return "market"
+    sx = str(x).strip().lower()
+    if "|" in sx:   # "market|limit"
+        return "market"
+    if "market" in sx:
+        return "market"
+    if "limit" in sx:
+        return "limit"
+    return "market"
+
+def _to_int(x, default=10) -> int:
     try:
-        resp3 = _call_chat_completions(_DEEPSEEK_MODEL_FALLBACK, messages, True)
-        meta["model_used"] = _DEEPSEEK_MODEL_FALLBACK
-        meta["raw_response"] = resp3
-        js3 = _parse_content_to_json(resp3)
-        if js3:
-            return js3, meta
-    except Exception as e3:
-        meta["error"] = f"fallback error: {e3}"
+        if isinstance(x, (int, float)):
+            return int(x)
+        if x is None:
+            return default
+        s = str(x).strip()
+        # 提取首个整数（支持 '15bps' / '约10'）
+        m = re.search(r"-?\d+", s)
+        if m:
+            return int(m.group(0))
+        return default
+    except:
+        return default
 
-    # 4) 最后尝试：text 模式 + 正则提取
+def _to_float(x, default=0.0) -> float:
     try:
-        resp4 = _call_chat_completions(_DEEPSEEK_MODEL_FALLBACK, messages, False)
-        meta["model_used"] = _DEEPSEEK_MODEL_FALLBACK
-        meta["raw_response"] = resp4
-        js4 = _parse_content_to_json(resp4)
-        if js4:
-            return js4, meta
-    except Exception as e4:
-        meta["error"] = f"final text-mode error: {e4}"
+        if isinstance(x, (int, float)):
+            return float(x)
+        if x is None:
+            return default
+        s = str(x).strip().replace("%", "")
+        # 处理范围 '0.0~0.05' / '0.0-0.05'
+        if "~" in s or "-" in s:
+            parts = re.split(r"[~-]", s)
+            nums = []
+            for p in parts:
+                p = p.strip()
+                if re.match(r"^-?\d+(\.\d+)?$", p):
+                    nums.append(float(p))
+            if len(nums) >= 2:
+                return (nums[0] + nums[1]) / 2.0
+            if len(nums) == 1:
+                return nums[0]
+            return default
+        # 抓取首个数字（支持 '0.01' / '15bps' / '≈0.02'）
+        m = re.search(r"-?\d+(\.\d+)?", s)
+        if m:
+            return float(m.group(0))
+        return default
+    except:
+        return default
 
-    return None, meta
+def _clip(x, lo, hi):
+    try:
+        return max(lo, min(float(x), hi))
+    except:
+        return max(lo, min(x, hi))
+
+def _normalize_decision(decision: dict, market: dict) -> dict:
+    d = (decision or {}).get("decision", {}) or {}
+
+    # --- 符号 ---
+    sym = d.get("symbol") or (list(market.keys()) or ["BTC-USDT"])[0]
+
+    # --- 方向 / 委托类型 ---
+    side = _coerce_side(d.get("side"))
+    order_type = _coerce_order_type(d.get("order_type"))
+
+    # --- 数值字段（鲁棒解析 + 边界约束） ---
+    max_slip = _to_int(d.get("max_slippage_bps"), default=10)
+    risk = d.get("risk") or {}
+    sl = _to_float(risk.get("stop_loss_pct"), default=0.01)     # 默认 1% 止损
+    tp = _to_float(risk.get("take_profit_pct"), default=0.02)   # 默认 2% 止盈
+    conf = _to_float(d.get("confidence"), default=0.6)
+
+    # --- 边界裁剪 ---
+    max_slip = int(_clip(max_slip, 1, 200))       # 1 ~ 200 bps
+    sl = _clip(sl, 0.0, 0.20)                     # 0 ~ 20%
+    tp = _clip(tp, 0.0, 0.50)                     # 0 ~ 50%
+    conf = _clip(conf, 0.0, 1.0)                  # 0 ~ 1
+
+    # --- 理由 ---
+    rationale = d.get("rationale") or d.get("reason") or "无"
+
+    # --- 若 side 仍不确定，退回 hold（安全闸） ---
+    if side not in ("buy", "sell", "hold"):
+        side = "hold"
+
+    # --- 组装规范化结果 ---
+    norm = {
+        "version": "1.0",
+        "decision": {
+            "symbol": sym,
+            "side": side,
+            "order_type": order_type,
+            "max_slippage_bps": max_slip,
+            "risk": {"stop_loss_pct": sl, "take_profit_pct": tp},
+            "confidence": conf,
+            "rationale": rationale
+        },
+        "ts": decision.get("ts") or datetime.now(timezone.utc).isoformat()
+    }
+
+    # --- 调试：如出现模板占位被更正，打印一次（便于定位） ---
+    if any([
+        isinstance(d.get("max_slippage_bps"), str),
+        isinstance(risk.get("stop_loss_pct"), str),
+        isinstance(risk.get("take_profit_pct"), str),
+        isinstance(d.get("confidence"), str),
+        ("|" in str(d.get("side") or "")),
+        ("|" in str(d.get("order_type") or "")),
+    ]):
+        print(f"[DeepSeek] normalized template -> side={side}, sl={sl}, tp={tp}, slip={max_slip}, conf={conf}")
+
+    return norm
