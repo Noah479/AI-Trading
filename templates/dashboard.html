@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Alpha Arena · OKX Demo Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind / 固定 UMD 版 Chart.js（更稳） -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <style>
+    .glass { background: rgba(255,255,255,0.06); backdrop-filter: blur(6px); }
+    .chip { transition: all .15s ease; }
+    .chip.active { background: rgba(59,130,246,0.15); border-color: rgba(59,130,246,0.5); }
+    .status-dot{ width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:6px }
+    /* 迷你图高度（紧凑） */
+    #chartWrap { height: 10rem; }
+    @media (min-width: 768px){ #chartWrap{ height: 11rem; } }
+    body.compact #chartWrap { height: 8.5rem; }
+    .pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-20 bg-slate-950/80 backdrop-blur border-b border-slate-800">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <span class="text-2xl">📈</span>
+        <h1 class="text-xl md:text-2xl font-semibold">Alpha Arena · OKX Demo Dashboard</h1>
+      </div>
+      <div class="text-sm text-slate-300 flex items-center gap-3">
+        <span id="status-dot" class="status-dot bg-rose-500"></span>
+        <span id="last-updated">Last update: —</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- Summary cards（含 Unrealized PnL 卡片） -->
+    <section class="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">
+      <div class="glass rounded-xl p-3 md:p-4 border border-slate-800">
+        <div class="text-slate-400 text-xs md:text-sm">Total Equity (incl. Unrealized PnL)</div>
+        <div id="sum-totalEq" class="text-xl md:text-2xl font-semibold mt-1">—</div>
+      </div>
+
+      <div class="glass rounded-xl p-3 md:p-4 border border-slate-800">
+        <div class="text-slate-400 text-xs md:text-sm">Unrealized PnL</div>
+        <div class="flex items-baseline gap-2">
+          <div id="sum-upnl" class="text-xl md:text-2xl font-semibold mt-1">—</div>
+          <div id="sum-upnl-pct" class="pill mt-1 bg-slate-800 text-slate-200">—%</div>
+        </div>
+      </div>
+
+      <div class="glass rounded-xl p-3 md:p-4 border border-slate-800">
+        <div class="text-slate-400 text-xs md:text-sm">USDT Balance</div>
+        <div id="sum-usdt" class="text-xl md:text-2xl font-semibold mt-1">—</div>
+      </div>
+      <div class="glass rounded-xl p-3 md:p-4 border border-slate-800">
+        <div class="text-slate-400 text-xs md:text-sm">BTC Balance</div>
+        <div id="sum-btc" class="text-xl md:text-2xl font-semibold mt-1">—</div>
+      </div>
+      <div class="glass rounded-xl p-3 md:p-4 border border-slate-800">
+        <div class="text-slate-400 text-xs md:text-sm">ETH Balance</div>
+        <div id="sum-eth" class="text-xl md:text-2xl font-semibold mt-1">—</div>
+      </div>
+    </section>
+
+    <!-- Symbol chips -->
+    <section class="glass rounded-xl p-2.5 md:p-3 border border-slate-800">
+      <div class="flex flex-wrap items-center gap-2">
+        <button data-sym="ALL" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">ALL</button>
+        <button data-sym="BTC-USDT" class="chip active px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">BTC</button>
+        <button data-sym="ETH-USDT" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">ETH</button>
+        <button data-sym="BNB-USDT" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">BNB</button>
+        <button data-sym="SOL-USDT" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">SOL</button>
+        <button data-sym="XRP-USDT" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">XRP</button>
+        <button data-sym="DOGE-USDT" class="chip px-3 py-1 border border-slate-700 rounded-full text-xs md:text-sm">DOGE</button>
+
+        <div class="ml-auto flex items-center gap-2">
+          <div id="live-ticker" class="text-[11px] md:text-xs text-slate-300 pill bg-slate-800">—</div>
+          <div class="text-[11px] md:text-xs text-slate-400">Data age: <span id="age-sec">—</span>s</div>
+          <button id="toggleCompact" class="px-2 py-1 text-[11px] md:text-xs border border-slate-700 rounded hover:bg-slate-800">
+            Compact
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Price cards -->
+    <section id="cards" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3"></section>
+
+    <!-- Live Prices：迷你渐变面积图 -->
+    <section class="glass rounded-xl p-3 border border-slate-800">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-base font-medium">Live Prices</h2>
+        <div class="text-[11px] md:text-xs text-slate-400">Click chips to focus</div>
+      </div>
+      <div id="chartWrap"><canvas id="priceChart"></canvas></div>
+    </section>
+
+    <!-- Balances table -->
+    <section class="glass rounded-xl p-3 border border-slate-800">
+      <h3 class="text-base font-medium mb-2">Balances (by currency)</h3>
+      <div id="balance-table" class="text-xs md:text-sm text-slate-300">Loading…</div>
+    </section>
+
+  </main>
+
+  <footer class="max-w-7xl mx-auto px-4 pb-8 text-center text-[11px] md:text-xs text-slate-500">
+    Powered by OKX Demo · Flask proxy · Chart.js · Tailwind
+  </footer>
+
+  <script>
+    /* ---------- Config ---------- */
+    const SYMBOLS = ["BTC-USDT","ETH-USDT","BNB-USDT","SOL-USDT","XRP-USDT","DOGE-USDT"];
+    const COLORS = {
+      "BTC-USDT":"#f59e0b","ETH-USDT":"#22c55e","BNB-USDT":"#eab308",
+      "SOL-USDT":"#06b6d4","XRP-USDT":"#a78bfa","DOGE-USDT":"#f97316"
+    };
+    const fmt = (n, d=2) => Number(n ?? 0).toLocaleString("en-US",{maximumFractionDigits:d});
+    const $ = s => document.querySelector(s);
+    let activeSymbol = "BTC-USDT";   // 当前聚焦（ALL 表示多线）
+
+    // —— 全局 Chart 实例（防重复 new） ——
+    let chart = null;
+
+    /* ---------- Chart 初始化（复用已有实例） ---------- */
+    function chartConfig() {
+      return {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: SYMBOLS.map(sym => ({
+            label: sym,
+            data: [],
+            borderColor: COLORS[sym],
+            backgroundColor: 'transparent',   // 先透明，后续按需上色
+            borderWidth: 1.2,
+            pointRadius: 0,
+            tension: 0.25,
+            spanGaps: true,
+            hidden: sym !== "BTC-USDT"        // 默认只看 BTC
+          }))
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false, animation: false,
+          plugins: { legend: { display: false }, tooltip: { mode: 'nearest', intersect: false } },
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: { ticks: { color: '#94a3b8', maxTicksLimit: 6 }, grid: { color: 'rgba(148,163,184,0.06)' } },
+            y: { 
+              ticks: { color: '#94a3b8', maxTicksLimit: 4 }, 
+              grid: { color: 'rgba(148,163,184,0.08)' }, 
+              grace: '6%'   /* 🛠 FIX：这里必须是数字或字符串百分比，不能是对象 */
+            }
+          }
+        }
+      };
+    }
+
+    function ensureChart() {
+      const canvas = document.getElementById('priceChart');
+      if (!window.Chart || !canvas) return false;
+      const existing = Chart.getChart(canvas);
+      if (existing) { chart = existing; return true; }
+      chart = new Chart(canvas.getContext('2d'), chartConfig());
+      return true;
+    }
+
+    /* ---------- 面积填充（用 RGBA，避免 CanvasGradient 报错） ---------- */
+    function hexToRgba(hex, a=1){
+      const m = hex.replace('#',''); const v = parseInt(m, 16);
+      return `rgba(${(v>>16)&255},${(v>>8)&255},${v&255},${a})`;
+    }
+    function applyAreaFill() {
+      if (!chart) return;
+      chart.data.datasets.forEach(ds => {
+        if (activeSymbol !== 'ALL' && ds.label === activeSymbol && !ds.hidden) {
+          ds.backgroundColor = hexToRgba(ds.borderColor, 0.22);
+          ds.borderWidth = 1.6;
+        } else {
+          ds.backgroundColor = 'transparent';
+          ds.borderWidth = 1.0;
+        }
+      });
+    }
+
+    /* ---------- 其它工具 ---------- */
+    const prev = Object.fromEntries(SYMBOLS.map(s => [s, null]));
+    function upDownArrow(curr, last){
+      if (last === null || !isFinite(curr)) return '';
+      if (curr > last) return '<span class="text-emerald-400">▲</span>';
+      if (curr < last) return '<span class="text-rose-400">▼</span>';
+      return '—';
+    }
+
+    function cardHTML(sym, obj) {
+      const last = parseFloat(obj?.last ?? "NaN");
+      const bid  = parseFloat(obj?.bid ?? "NaN");
+      const ask  = parseFloat(obj?.ask ?? "NaN");
+      const high = parseFloat(obj?.high ?? "NaN");
+      const low  = parseFloat(obj?.low  ?? "NaN");
+      const arrow = isFinite(last) ? upDownArrow(last, prev[sym]) : '';
+      const spread = (isFinite(bid) && isFinite(ask)) ? (ask - bid) : null;
+      return `
+        <div class="rounded-xl p-3 border border-slate-800 glass">
+          <div class="flex items-center justify-between mb-1">
+            <div class="font-semibold text-sm">${sym}</div>
+            <div class="text-[10px] px-1.5 py-0.5 rounded-full" style="background:${COLORS[sym]}20;color:${COLORS[sym]}">LIVE</div>
+          </div>
+          <div class="text-xl font-bold flex items-center gap-2">
+            ${isFinite(last) ? fmt(last, 4) : '—'} <span>${arrow}</span>
+          </div>
+          <div class="mt-1.5 grid grid-cols-2 gap-2 text-[11px] text-slate-300">
+            <div>Bid: <span class="text-slate-100">${isFinite(bid)?fmt(bid,4):'—'}</span></div>
+            <div>Ask: <span class="text-slate-100">${isFinite(ask)?fmt(ask,4):'—'}</span></div>
+            <div>24h H: <span class="text-slate-100">${isFinite(high)?fmt(high,4):'—'}</span></div>
+            <div>24h L: <span class="text-slate-100">${isFinite(low)?fmt(low,4):'—'}</span></div>
+          </div>
+          <div class="mt-1 text-[11px] text-slate-400">Spread: ${spread!==null?fmt(spread,6):'—'}</div>
+        </div>`;
+    }
+
+    function renderCards(market){
+      document.getElementById('cards').innerHTML =
+        SYMBOLS.map(sym => cardHTML(sym, market[sym] || null)).join('');
+    }
+
+    function setStatus(ok, age){
+      $('#status-dot').className = 'status-dot ' + (ok ? 'bg-emerald-500' : 'bg-rose-500');
+      $('#age-sec').textContent = isFinite(age) ? age.toFixed(1) : '—';
+      $('#last-updated').textContent = 'Last update: ' + new Date().toLocaleTimeString();
+    }
+
+    function updateLiveTicker(market){
+      if (activeSymbol === 'ALL') { $('#live-ticker').textContent = 'All symbols'; return; }
+      const px = parseFloat(market?.[activeSymbol]?.last ?? "NaN");
+      const arrow = upDownArrow(px, prev[activeSymbol]);
+      const el = $('#live-ticker');
+      if (isFinite(px)) {
+        el.innerHTML = `${activeSymbol} · ${fmt(px,4)} ${arrow}`;
+        el.style.background = 'rgba(30,41,59,0.9)';
+        el.style.color = (prev[activeSymbol]!==null && px < prev[activeSymbol]) ? '#ef4444' : '#22c55e';
+      } else { el.textContent = `${activeSymbol} · —`; el.style.color = '#cbd5e1'; }
+    }
+
+    /* ---------- 拉行情 ---------- */
+    async function fetchMarket(){
+      try{
+        const r = await fetch('/market');
+        const d = await r.json();
+        const market = d.data || {};
+        const age = Number.isFinite(Number(d.age_seconds)) ? Number(d.age_seconds)
+                   : (d.updated_at ? (Date.now() - new Date(d.updated_at).getTime())/1000 : NaN);
+        setStatus(true, age);
+
+        renderCards(market);
+
+        // 只有在图表就绪时才更新
+        if (ensureChart()){
+          const label = new Date().toLocaleTimeString();
+          chart.data.labels.push(label);
+          if (chart.data.labels.length > 48) chart.data.labels.shift();
+
+          SYMBOLS.forEach((sym, i) => {
+            const last = parseFloat(market[sym]?.last ?? "NaN");
+            const arr = chart.data.datasets[i].data;
+            arr.push(isFinite(last) ? last : null);
+            if (arr.length > 48) arr.shift();
+            if (isFinite(last)) prev[sym] = last;
+          });
+
+          applyAreaFill();
+          updateLiveTicker(market);
+          chart.update();
+        } else {
+          updateLiveTicker(market);
+        }
+      }catch(e){
+        setStatus(false, NaN);
+        console.error('market error', e);
+      }
+    }
+
+    /* ---------- 拉余额（兼容两种返回结构） ---------- */
+    async function fetchBalance(){
+      try{
+        const r = await fetch('/balance');
+        const d = await r.json();
+
+        if (d.code === "0"){
+          const totalEqRaw = Number(d.totalEq ?? d.data?.[0]?.totalEq ?? 0);
+          const details = Array.isArray(d.details)
+            ? d.details
+            : (Array.isArray(d.data?.[0]?.details) ? d.data[0].details : []);
+          const byCcy = Object.fromEntries(details.map(x => [x.ccy, x.eq]));
+          const upnl = Number(d.unrealizedPnL ?? 0);
+          const totalIncl = Number(d.totalEq_incl_unrealized ?? (totalEqRaw + upnl));
+
+          // Summary
+          document.getElementById('sum-totalEq').textContent = '$ ' + fmt(totalIncl, 2);
+
+          const upnlEl = document.getElementById('sum-upnl');
+          const upnlPctEl = document.getElementById('sum-upnl-pct');
+          upnlEl.textContent = (upnl >= 0 ? '+' : '') + fmt(upnl, 2);
+          const pct = totalEqRaw ? (upnl / totalEqRaw) * 100 : 0;
+          upnlPctEl.textContent = (upnl >= 0 ? '+' : '') + fmt(pct, 2) + '%';
+          const color = upnl > 0 ? '#22c55e' : (upnl < 0 ? '#ef4444' : '#e5e7eb');
+          upnlEl.style.color = color;
+          upnlPctEl.style.color = color;
+          upnlPctEl.style.background = upnl > 0 ? 'rgba(34,197,94,0.15)'
+                                               : upnl < 0 ? 'rgba(239,68,68,0.15)'
+                                                          : 'rgba(148,163,184,0.15)';
+
+          document.getElementById('sum-usdt').textContent = fmt(byCcy['USDT'] ?? 0, 2);
+          document.getElementById('sum-btc').textContent  = fmt(byCcy['BTC']  ?? 0, 8);
+          document.getElementById('sum-eth').textContent  = fmt(byCcy['ETH']  ?? 0, 6);
+
+          // Table
+          const rows = details
+            .filter(x => Number(x.eq) > 0)
+            .sort((a,b)=> a.ccy.localeCompare(b.ccy))
+            .map(x => `<tr>
+              <td class="py-1.5 px-2.5">${x.ccy}</td>
+              <td class="py-1.5 px-2.5 text-right">${fmt(x.eq)}</td>
+              <td class="py-1.5 px-2.5 text-right text-slate-400">${fmt(x.eqUsd)}</td>
+            </tr>`).join('');
+
+          document.getElementById('balance-table').innerHTML = `
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-xs">
+                <thead class="text-slate-400 border-b border-slate-800">
+                  <tr><th class="py-1.5 px-2.5 text-left">Currency</th>
+                      <th class="py-1.5 px-2.5 text-right">Amount</th>
+                      <th class="py-1.5 px-2.5 text-right">USD Value</th></tr>
+                </thead>
+                <tbody>${rows || '<tr><td class="py-3 text-slate-400" colspan="3">No balances</td></tr>'}</tbody>
+              </table>
+            </div>`;
+        } else {
+          document.getElementById('balance-table').textContent = JSON.stringify(d);
+        }
+      }catch(e){
+        document.getElementById('balance-table').textContent = 'Failed to load balance';
+        console.error('balance error', e);
+      }
+    }
+
+    /* ---------- 交互 ---------- */
+    function focusSymbol(sym){
+      activeSymbol = sym;
+      document.querySelectorAll('.chip').forEach(b => b.classList.toggle('active', b.dataset.sym === sym));
+      if (ensureChart()){
+        chart.data.datasets.forEach(ds => { ds.hidden = (sym !== 'ALL' && ds.label !== sym); });
+        applyAreaFill(); chart.update();
+      }
+    }
+    document.querySelectorAll('.chip').forEach(btn => {
+      btn.addEventListener('click', () => focusSymbol(btn.getAttribute('data-sym')));
+    });
+    document.getElementById('toggleCompact').addEventListener('click', () => {
+      document.body.classList.toggle('compact'); if (ensureChart()) chart.resize();
+    });
+
+    /* ---------- 定时任务 ---------- */
+    fetchMarket(); fetchBalance();
+    setInterval(fetchMarket, 2000);
+    setInterval(fetchBalance, 5000);
+  </script>
+</body>
+</html>
