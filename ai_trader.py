@@ -8,7 +8,7 @@ from risk_manager import RiskManager, RiskConfig, SymbolRule
 import talib
 import numpy as np
 import pandas as pd
-
+import csv
 from pathlib import Path
 
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
@@ -172,12 +172,41 @@ def _http_get_json(path: str):
         progress.error(f"HTTP 请求失败: {e}")
         raise
 
-import talib
-import numpy as np
+
+def _indicators_from_candles(candles_arr):
+    """
+    candles_arr: [[open,high,low,close,volume], ...] 旧->新
+    输出：一套 EMA/RSI/ATR/MACD/ADX/BOLL 指标（最后一根）
+    """
+    import numpy as np, talib
+    closes = np.array([c[3] for c in candles_arr], dtype=float)
+    highs  = np.array([c[1] for c in candles_arr], dtype=float)
+    lows   = np.array([c[2] for c in candles_arr], dtype=float)
+
+    ema_fast = float(np.nan_to_num(talib.EMA(closes, timeperiod=12)[-1]))
+    ema_slow = float(np.nan_to_num(talib.EMA(closes, timeperiod=48)[-1]))
+    rsi14    = float(np.nan_to_num(talib.RSI(closes, timeperiod=14)[-1]))
+    atr14    = float(np.nan_to_num(talib.ATR(highs, lows, closes, timeperiod=14)[-1]))
+    macd, macd_signal, _ = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
+    macd = float(np.nan_to_num(macd[-1])); macd_signal = float(np.nan_to_num(macd_signal[-1]))
+    adx14 = float(np.nan_to_num(talib.ADX(highs, lows, closes, timeperiod=14)[-1]))
+    bu, bm, bl = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+    boll_upper = float(np.nan_to_num(bu[-1])); boll_mid=float(np.nan_to_num(bm[-1])); boll_lower=float(np.nan_to_num(bl[-1]))
+    return dict(ema_fast=ema_fast, ema_slow=ema_slow, rsi14=rsi14, atr14=atr14,
+                macd=macd, macd_signal=macd_signal, adx14=adx14,
+                boll_upper=boll_upper, boll_mid=boll_mid, boll_lower=boll_lower)
 
 def fetch_market() -> dict:
     """
-    获取行情数据 + 自动计算技术指标（EMA / RSI / ATR / MACD / ADX / BOLL）
+    获取行情数据 + (30m 基线 & 4h 背景) 指标
+    返回：
+      market[sym] = {
+        price,last,high24h,low24h,
+        # 30m 扁平字段（与 deepseek_client 现有读取兼容）
+        ema_fast, ema_slow, rsi14, atr14, macd, macd_signal, adx14, boll_upper, boll_mid, boll_lower,
+        # 4h 背景（如果服务端提供或可近似聚合）
+        "tf": {"4h": {同上键}}
+      }
     """
     progress.step("获取市场行情", "调用 /market 接口")
     resp = _http_get_json("/market")
@@ -185,89 +214,66 @@ def fetch_market() -> dict:
     m = {}
 
     for s in SYMBOLS:
-        v = inner.get(s)
+        v = inner.get(s) or {}
         if not isinstance(v, dict):
             continue
 
-        price = float(v.get("price") or v.get("last") or 0)
+        price = float(v.get("price") or v.get("last") or 0.0)
         if price <= 0:
             progress.warning(f"{s} 没有价格数据")
             continue
 
-        # === 模拟最近K线数据（或直接从交易所拉K线） ===
-        candles = v.get("candles")  # 例如最近 100 根 [open, high, low, close, volume]
-        if not candles:
-            # 没有蜡烛数据时，构造一个虚拟价格序列防止talib报错
-            prices = np.array([price * (1 + np.sin(i/10)*0.02) for i in range(120)], dtype=float)
-            highs = prices * 1.01
-            lows = prices * 0.99
-            closes = prices
-        else:
-            closes = np.array([c[4] for c in candles], dtype=float)  # close
-            highs  = np.array([c[2] for c in candles], dtype=float)  # high
-            lows   = np.array([c[3] for c in candles], dtype=float)  # low
+        # 兼容两种返回：1) 列表 2) 多周期映射 {"30m":[...], "4h":[...]}
+        candles_raw = v.get("candles")
+        c30, c4h = None, None
+        if isinstance(candles_raw, dict):
+            c30 = candles_raw.get("30m")
+            c4h = candles_raw.get("4h")
+        elif isinstance(candles_raw, (list, tuple)):
+            c30 = candles_raw  # 兼容旧结构：只有一套 K 线
 
-        # === 用 TA-Lib 计算基础指标 ===
-        ema_fast = float(talib.EMA(closes, timeperiod=7)[-1])
-        ema_slow = float(talib.EMA(closes, timeperiod=25)[-1])
-        rsi14 = float(talib.RSI(closes, timeperiod=14)[-1])
-        atr14 = float(talib.ATR(highs, lows, closes, timeperiod=14)[-1])
+        # 兜底：若 30m 不足，构造一段平滑序列防止 talib 报错
+        if not c30 or len(c30) < 60:
+            import numpy as np
+            closes = np.array([price*(1+0.01*np.sin(i/8)) for i in range(120)], dtype=float)
+            c30 = [[closes[i], closes[i]*1.01, closes[i]*0.99, closes[i], 1.0] for i in range(len(closes))]
+            progress.warning(f"{s} 缺少 30m candles，使用模拟序列兜底")
 
-        # === 新增：趋势确认与波动指标 ===
-        macd, macd_signal, _ = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
-        adx14 = talib.ADX(highs, lows, closes, timeperiod=14)[-1]
-        boll_upper, boll_middle, boll_lower = talib.BBANDS(
-            closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
-        )
+        # 兜底：若没有 4h，先用 30m 做个粗聚合（30m×8≈4h）
+        if not c4h or len(c4h) < 60:
+            c4h = c30[::8]
 
-        # === 🧹 在这里插入 NaN 清洗 ===
-        ema_fast = float(np.nan_to_num(ema_fast))
-        ema_slow = float(np.nan_to_num(ema_slow))
-        rsi14 = float(np.nan_to_num(rsi14))
-        atr14 = float(np.nan_to_num(atr14))
-        macd = np.nan_to_num(macd)
-        macd_signal = np.nan_to_num(macd_signal)
-        adx14 = float(np.nan_to_num(adx14))
-        boll_upper = float(np.nan_to_num(boll_upper[-1]))
-        boll_middle = float(np.nan_to_num(boll_middle[-1]))
-        boll_lower = float(np.nan_to_num(boll_lower[-1]))
+        # === 指标计算（正确使用 [o,h,l,c,vol] 的索引） ===
+        base30 = _indicators_from_candles(c30)
+        ctx4h  = _indicators_from_candles(c4h) if c4h else None
 
         # === 调试输出 ===
-        progress.substep(
-            f"{s}: EMAf={ema_fast:.2f}, EMAs={ema_slow:.2f}, RSI={rsi14:.1f}, MACD={macd[-1]:.4f}, ADX={adx14:.2f}"
-        )
+        if ctx4h:
+            progress.substep(
+                f"{s} | 30m: RSI={base30['rsi14']:.1f}, MACD={base30['macd']:.4f}, ADX={base30['adx14']:.1f} | "
+                f"4h: RSI={ctx4h['rsi14']:.1f}, ADX={ctx4h['adx14']:.1f}"
+            )
+        else:
+            progress.substep(
+                f"{s} | 30m: RSI={base30['rsi14']:.1f}, MACD={base30['macd']:.4f}, ADX={base30['adx14']:.1f}"
+            )
 
-
-        # === 汇总所有指标 ===
-        m[s] = {
-            **v,
+        # === 汇总（30m 扁平 + 可选的 4h 背景） ===
+        row = {
             "price": price,
-            # 趋势类
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            # 动能类
-            "rsi14": rsi14,
-            # 波动类
-            "atr14": atr14,
-            # 趋势确认
-            "macd": float(macd[-1]),
-            "macd_signal": float(macd_signal[-1]),
-            # 趋势强度
-            "adx14": float(adx14),
-            # 波动区间
-            "boll_upper": float(boll_upper),
-            "boll_mid": float(boll_middle),
-            "boll_lower": float(boll_lower),
+            "last":  price,
+            "high24h": float(v.get("high24h") or 0.0),
+            "low24h":  float(v.get("low24h")  or 0.0),
+            **base30
         }
+        if ctx4h:
+            row["tf"] = {"4h": ctx4h}
 
-        # progress.substep(
-        #     f"{s}: price={price:.2f}, RSI={rsi14:.1f}, EMA={ema_fast:.1f}/{ema_slow:.1f}, "
-        #     f"MACD={macd[-1]:.4f}, ADX={adx14:.2f}"
-        # )
-        print(f"[DEBUG] {s}: EMAf={ema_fast:.2f}, EMAs={ema_slow:.2f}, RSI={rsi14:.2f}, MACD={macd[-1]:.4f}, MACD_sig={macd_signal[-1]:.4f}, ADX={adx14:.2f}, BOLL=({boll_lower:.2f}, {boll_middle:.2f}, {boll_upper:.2f})")
-    
-    progress.success(f"获取到 {len(m)} 个交易对的行情（含EMA/RSI/ATR/MACD/ADX/BOLL指标）")
+        m[s] = row
+
+    progress.success(f"获取到 {len(m)} 个交易对 (含 30m & 4h 指标)")
     return m
+
 
 def fetch_balance() -> dict:
     """GET /balance → 映射 totalEq_incl_unrealized/totalEq 为 USDT.available"""
@@ -333,6 +339,103 @@ def _build_constraints():
              for k, v in SYMBOL_RULES.items()}
     return {"symbols": SYMBOLS, "symbol_rules": rules,
             "defaults": {"max_slippage_bps": 15}}
+
+def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs"):
+    """
+    把每次 AI 决策结果记录到 logs/ai_decision_log.csv
+    """
+    os.makedirs(log_dir, exist_ok=True)
+    file_path = os.path.join(log_dir, "ai_decision_log.csv")
+    headers = [
+        "ts","symbol","side","confidence","rationale",
+        "stop_loss_pct","take_profit_pct","adx14","rsi14","macd","price"
+    ]
+
+    d = decision.get("decision", {})
+    sym = d.get("symbol")
+    row = market.get(sym, {})
+
+    record = {
+        "ts": decision.get("ts"),
+        "symbol": sym,
+        "side": d.get("side"),
+        "confidence": d.get("confidence"),
+        "rationale": d.get("rationale"),
+        "stop_loss_pct": (d.get("risk") or {}).get("stop_loss_pct"),
+        "take_profit_pct": (d.get("risk") or {}).get("take_profit_pct"),
+        "adx14": row.get("adx14"),
+        "rsi14": row.get("rsi14"),
+        "macd": row.get("macd"),
+        "price": row.get("price")
+    }
+
+    write_header = not os.path.exists(file_path)
+    with open(file_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(record)
+
+    print(f"🧾 已写入日志: {file_path}")
+
+def compute_local_signal(market: dict):
+    """
+    返回: (symbol, side, score) 轻量信号，用于“是否触发 AI 决策”的事件驱动开关
+    规则（简洁可调）：
+      - 30m: ema_fast>ema_slow + macd>signal + adx>22 => 多 +2
+      - 30m: ema_fast<ema_slow + macd<signal + adx>22 => 空 -2
+      - 4h : 4h adx>20 且 4h ema_fast>ema_slow => 多 +0.5（反向 -0.5）
+    """
+    best = (None, "hold", 0.0)
+    for sym, row in market.items():
+        b = row
+        ctx = (row.get("tf") or {}).get("4h", {})
+        score = 0.0
+        score += (1 if b.get("ema_fast") > b.get("ema_slow") else -1)
+        score += (0.7 if b.get("macd") > b.get("macd_signal") else -0.7)
+        if (b.get("adx14") or 0) > 22:  # 趋势强化
+            score *= 1.2
+        if ctx and (ctx.get("adx14") or 0) > 20:
+            score += (0.5 if ctx.get("ema_fast") > ctx.get("ema_slow") else -0.5)
+        side = "buy" if score >= 1.6 else ("sell" if score <= -1.6 else "hold")
+        if abs(score) > abs(best[2]):
+            best = (sym, side, score)
+    return best
+
+
+def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs"):
+    os.makedirs(log_dir, exist_ok=True)
+    file_path = os.path.join(log_dir, "ai_decision_log.csv")
+    headers = [
+        "ts","symbol","side","confidence","rationale",
+        "stop_loss_pct","take_profit_pct","adx14","rsi14","macd","price"
+    ]
+
+    d = decision.get("decision", {})
+    sym = d.get("symbol")
+    row = market.get(sym, {})
+
+    record = {
+        "ts": decision.get("ts"),
+        "symbol": sym,
+        "side": d.get("side"),
+        "confidence": d.get("confidence"),
+        "rationale": d.get("rationale"),
+        "stop_loss_pct": (d.get("risk") or {}).get("stop_loss_pct"),
+        "take_profit_pct": (d.get("risk") or {}).get("take_profit_pct"),
+        "adx14": row.get("adx14"),
+        "rsi14": row.get("rsi14"),
+        "macd": row.get("macd"),
+        "price": row.get("price")
+    }
+
+    write_header = not os.path.exists(file_path)
+    with open(file_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(record)
+    print(f"🧾 已写入日志: {file_path}")
 
 def _decisions_from_ai(market: dict, balance: dict) -> dict:
     """DeepSeek 决策 → TRADING_DECISIONS JSON"""
@@ -465,6 +568,11 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
                     })
 
     _save_run_state(st)
+
+    # ✅ 把本次决策写入日志
+    if isinstance(decision, dict) and "decision" in decision:
+        _log_decision_to_csv(decision, meta, market)
+        
     progress.success("决策生成完成")
     return td
 
@@ -537,4 +645,35 @@ def main_once():
 
 
 if __name__ == "__main__":
-    main_once()
+    MIN_AI_INTERVAL_SEC = 15*60     # 最短15分钟
+    MAX_AI_INTERVAL_SEC = 60*60     # 最长60分钟（超时也要跑一次）
+    last_sig = None
+    last_call_ts = 0
+
+    while True:
+        try:
+            market = fetch_market()
+            balance = fetch_balance()
+
+            sym, side, score = compute_local_signal(market)
+            sig = f"{sym}:{side}:{round(score,2)}"
+            now = time.time()
+
+            need_call = (sig != last_sig) or ((now - last_call_ts) > MAX_AI_INTERVAL_SEC)
+            recently_called = (now - last_call_ts) < MIN_AI_INTERVAL_SEC
+
+            progress.substep(f"[事件检测] signal={sig}, last={last_sig}, "
+                             f"need_call={need_call}, recently_called={recently_called}")
+
+            if need_call and not recently_called:
+                progress.substep("🔔 触发 AI 决策（事件驱动）")
+                main_once()           # 复用你完整的一次流程（含风控/下单/日志）
+                last_call_ts = now
+                last_sig = sig
+            else:
+                progress.substep("⏳ 未触发条件，继续监听...")
+
+        except Exception as e:
+            progress.error(f"主循环异常: {e}")
+
+        time.sleep(60)  # 每分钟检测一次事件

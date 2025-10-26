@@ -2,13 +2,17 @@ from flask import Flask, request, jsonify, render_template
 import requests, time, base64, hmac, hashlib, threading, json
 from config import OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE, OKX_BASE_URL
 import json, pathlib, os
+from flask import send_from_directory
 
 app = Flask(__name__)
 
 # 币种列表
 SYMBOLS = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT"]
 
-LOG_DIR = pathlib.Path(os.getenv("LOG_DIR", "logs"))
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+LOG_DIR = pathlib.Path(os.getenv("LOG_DIR", str(BASE_DIR / "logs")))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 SIGNAL_LOG = LOG_DIR / "recent_signals.jsonl"
 TRADE_LOG  = LOG_DIR / "recent_trades.jsonl"
 
@@ -22,12 +26,14 @@ _session.headers.update({"User-Agent":"okx-bridge/1.0"})
 # --- 简单缓存，降低OKX频率 ---
 _cache = {"ts":0, "snap":{}, "candles":{}}
 CACHE_TTL_SNAPSHOT = 2     # 快照缓存2秒
-CACHE_TTL_CANDLES  = 10    # K线缓存10秒
-CANDLE_LIMIT = 200
-CANDLE_BAR   = "1m"
+
+CACHE_TTL_CANDLES  = 600   # K线缓存10分钟（OKX防抖）
+CANDLE_LIMIT = 240         # 至少200根，给余量
+# 多周期清单（本次我们要 30m + 4h）
+BARS = ["30m", "4h"]
 
 def okx_get(path, params=None, timeout=5):
-    r = _session.get(OKX_API_BASE + path, params=params, timeout=timeout)
+    r = _session.get(OKX_BASE_URL + path, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
@@ -41,7 +47,7 @@ def fetch_snapshot_once(instId):
     low24h  = float(data.get("low24h", "0") or 0.0)
     return {"last": last, "high24h": high24h, "low24h": low24h}
 
-def fetch_candles_once(instId, bar=CANDLE_BAR, limit=CANDLE_LIMIT):
+def fetch_candles_once(instId, bar="30m", limit=CANDLE_LIMIT):
     """OKX 返回 [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]，按时间**倒序**。
        我们需要**正序**+精简为 [open, high, low, close, volume]。
     """
@@ -63,12 +69,12 @@ def fetch_snapshot_cached(instId):
         _cache["snap"][instId] = fetch_snapshot_once(instId)
     return _cache["snap"][instId]
 
-def fetch_candles_cached(instId):
+def fetch_candles_cached(instId, bar, limit=CANDLE_LIMIT):
     now = time.time()
-    key = f"{instId}:{CANDLE_BAR}:{CANDLE_LIMIT}"
+    key = f"{instId}:{bar}:{limit}"
     if key not in _cache["candles"] or (now - _cache["candles"][key]["ts"] > CACHE_TTL_CANDLES):
-        cds = fetch_candles_once(instId)
-        _cache["candles"][key] = {"ts":now, "data":cds}
+        cds = fetch_candles_once(instId, bar=bar, limit=limit)
+        _cache["candles"][key] = {"ts": now, "data": cds}
     return _cache["candles"][key]["data"]
 
 # ==============================
@@ -137,6 +143,16 @@ def _tail_jsonl(path: pathlib.Path, limit: int):
     # 倒序（最新在前）
     return list(reversed(arr))
 
+@app.get("/status")
+def serve_status_page():
+    # 直接从当前文件所在目录输出 ai_status.html
+    return send_from_directory(str(BASE_DIR), "ai_status.html")
+
+@app.get("/logs/<path:filename>")
+def serve_logs(filename):
+    # 直接从绝对 logs 目录输出任何日志文件（CSV/JSONL等）
+    return send_from_directory(str(LOG_DIR), filename)
+
 @app.get("/recent/signals")
 def recent_signals():
     limit = int(request.args.get("limit", 50))
@@ -168,13 +184,20 @@ def market():
     out = {"data": {}}
     for sym in SYMBOLS:
         snap = fetch_snapshot_cached(sym)
-        cds  = fetch_candles_cached(sym)  # ← ★ 新增：把K线合并回去
+        # 逐bar取回缓存
+        cds_30m = fetch_candles_cached(sym, "30m")
+        cds_4h  = fetch_candles_cached(sym, "4h")
+
         out["data"][sym] = {
-            "price": snap["last"],
-            "last":  snap["last"],
+            "price":  snap["last"],
+            "last":   snap["last"],
             "high24h": snap["high24h"],
             "low24h":  snap["low24h"],
-            "candles": cds
+            # ★ 多时间尺度：返回映射而不是单一列表
+            "candles": {
+                "30m": cds_30m,   # [[o,h,l,c,v], ...] 旧->新
+                "4h":  cds_4h
+            }
         }
     return jsonify(out)
 

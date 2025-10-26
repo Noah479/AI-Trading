@@ -134,6 +134,7 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "- market_snapshot[sym]: last / high24h / low24h（可能缺失）；\n"
         "- technical_indicators[sym]（可能部分缺失）：ema_fast, ema_slow, rsi14, atr14, macd, macd_signal, adx14, boll_upper, boll_mid, boll_lower；\n"
         "- constraints.risk_limits.max_slippage_bps（上限），constraints.symbols（允许交易列表），symbol_rules（精度/步长）。\n"
+        "technical_indicators[sym].tf_4h 为 4h 背景指标；以 30m 为执行基线，以 4h 作为趋势过滤/增强：同向放大分数，反向减弱甚至观望。"
         "\n"
         "【计算辅助量】（缺失则跳过或取安全默认）\n"
         "- pos24 = (last - low24h) / max(1e-9, high24h - low24h)，缺失用 0.5；\n"
@@ -196,28 +197,37 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "- 只输出**一个**严格JSON对象到 content；不得额外输出任何文字。\n"
     )
 
-    # 技术指标输入
     indicators = {}
     for sym in symbols:
         row = market.get(sym) or {}
+        ctx4h = (row.get("tf") or {}).get("4h", {})
         indicators[sym] = {
-            # 趋势
+            # 30m 基线（扁平，ai_trader 已填好）
             "ema_fast": row.get("ema_fast"),
             "ema_slow": row.get("ema_slow"),
-            # 动能
-            "rsi14": row.get("rsi14"),
-            # 波动
-            "atr14": row.get("atr14"),
-            # 趋势确认
-            "macd": row.get("macd"),
-            "macd_signal": row.get("macd_signal"),
-            # 趋势强度
-            "adx14": row.get("adx14"),
-            # 布林带
-            "boll_upper": row.get("boll_upper"),
-            "boll_mid": row.get("boll_mid"),
-            "boll_lower": row.get("boll_lower"),
+            "rsi14":    row.get("rsi14"),
+            "atr14":    row.get("atr14"),
+            "macd":         row.get("macd"),
+            "macd_signal":  row.get("macd_signal"),
+            "adx14":        row.get("adx14"),
+            "boll_upper":   row.get("boll_upper"),
+            "boll_mid":     row.get("boll_mid"),
+            "boll_lower":   row.get("boll_lower"),
+            # 4h 背景
+            "tf_4h": {
+                "ema_fast": ctx4h.get("ema_fast"),
+                "ema_slow": ctx4h.get("ema_slow"),
+                "rsi14":    ctx4h.get("rsi14"),
+                "atr14":    ctx4h.get("atr14"),
+                "macd":         ctx4h.get("macd"),
+                "macd_signal":  ctx4h.get("macd_signal"),
+                "adx14":        ctx4h.get("adx14"),
+                "boll_upper":   ctx4h.get("boll_upper"),
+                "boll_mid":     ctx4h.get("boll_mid"),
+                "boll_lower":   ctx4h.get("boll_lower"),
+            }
         }
+
 
     user_payload = {
         "objective": "根据市场数据和技术指标，判断趋势方向，输出 buy/sell/hold。",

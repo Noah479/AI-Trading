@@ -1,70 +1,272 @@
 <!doctype html>
 <html lang="zh-CN">
+
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI 实时状态 · Alpha Arena</title>
+  <!-- Chart.js + 时间轴适配器（缺这个会导致time坐标不可用） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
   <style>
-    :root { --bg:#0b1020; --panel:#12182a; --muted:#8aa0c5; --accent:#5ae0a3; --danger:#ff6b6b; --warn:#ffd166;}
-    *{box-sizing:border-box}
-    body{margin:0;padding:24px;background:var(--bg);color:#dfe7ff;font-family:system-ui,-apple-system,Segoe UI,Roboto}
-    .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
-    .card{background:var(--panel);border:1px solid #1d2742;border-radius:12px;padding:16px}
-    .col-4{grid-column:span 4}
-    .col-6{grid-column:span 6}
-    .col-8{grid-column:span 8}
-    .col-12{grid-column:span 12}
-    h1{margin:0 0 12px;font-size:20px}
-    .k{font-size:12px;color:var(--muted)}
-    .v{font-weight:700}
-    .row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:6px 0}
-    .pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 10px;font-size:12px}
-    .pill.on{background:rgba(90,224,163,0.12);color:var(--accent);border:1px solid rgba(90,224,163,0.35)}
-    .pill.off{background:rgba(255,107,107,0.12);color:var(--danger);border:1px solid rgba(255,107,107,0.35)}
-    .pill.warn{background:rgba(255,209,102,0.12);color:var(--warn);border:1px solid rgba(255,209,102,0.35)}
-    .muted{color:var(--muted)}
-    .bar{height:10px;background:#1e2741;border-radius:6px;overflow:hidden}
-    .bar>i{display:block;height:100%;background:linear-gradient(90deg,#4fc3f7,#5ae0a3)}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
-    .table{width:100%;border-collapse:collapse}
-    .table th,.table td{padding:8px;border-bottom:1px solid #222d4a;font-size:12px;text-align:left}
-    .right{text-align:right}
-    .btn{background:#223055;border:1px solid #2d3e66;color:#dfe7ff;border-radius:8px;padding:8px 12px;cursor:pointer}
-    .btn:active{transform:translateY(1px)}
-    @media(max-width:980px){.col-4,.col-6,.col-8,.col-12{grid-column:span 12}}
+    :root {
+      --bg: #0b1020;
+      --panel: #12182a;
+      --muted: #8aa0c5;
+      --accent: #5ae0a3;
+      --danger: #ff6b6b;
+      --warn: #ffd166;
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: #dfe7ff;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid #1d2742;
+      border-radius: 12px;
+      padding: 16px
+    }
+
+    .col-4 {
+      grid-column: span 4
+    }
+
+    .col-6 {
+      grid-column: span 6
+    }
+
+    .col-8 {
+      grid-column: span 8
+    }
+
+    .col-12 {
+      grid-column: span 12
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 20px
+    }
+
+    .k {
+      font-size: 12px;
+      color: var(--muted)
+    }
+
+    .v {
+      font-weight: 700
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 6px 0
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px
+    }
+
+    .pill.on {
+      background: rgba(90, 224, 163, 0.12);
+      color: var(--accent);
+      border: 1px solid rgba(90, 224, 163, 0.35)
+    }
+
+    .pill.off {
+      background: rgba(255, 107, 107, 0.12);
+      color: var(--danger);
+      border: 1px solid rgba(255, 107, 107, 0.35)
+    }
+
+    .pill.warn {
+      background: rgba(255, 209, 102, 0.12);
+      color: var(--warn);
+      border: 1px solid rgba(255, 209, 102, 0.35)
+    }
+
+    .muted {
+      color: var(--muted)
+    }
+
+    .bar {
+      height: 10px;
+      background: #1e2741;
+      border-radius: 6px;
+      overflow: hidden
+    }
+
+    .bar>i {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, #4fc3f7, #5ae0a3)
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse
+    }
+
+    .table th,
+    .table td {
+      padding: 8px;
+      border-bottom: 1px solid #222d4a;
+      font-size: 12px;
+      text-align: left
+    }
+
+    .right {
+      text-align: right
+    }
+
+    .btn {
+      background: #223055;
+      border: 1px solid #2d3e66;
+      color: #dfe7ff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer
+    }
+
+    .btn:active {
+      transform: translateY(1px)
+    }
+
+    /* ✅ 图表容器高度调整 */
+    .chart-container-price {
+      height: 240px;
+      margin-top: 12px;
+    }
+
+    .chart-container-indi {
+      height: 140px;
+      margin-top: 8px;
+    }
+
+    @media(max-width:980px) {
+
+      .col-4,
+      .col-6,
+      .col-8,
+      .col-12 {
+        grid-column: span 12
+      }
+
+      .chart-container-price {
+        height: 200px;
+      }
+
+      .chart-container-indi {
+        height: 120px;
+      }
+    }
   </style>
 </head>
+
 <body>
   <div class="grid">
-    <div class="col-12"><h1>AI 实时状态 · Alpha Arena <span class="k" id="updatedAt"></span></h1></div>
+    <div class="col-12">
+      <h1>AI 实时状态 · Alpha Arena <span class="k" id="updatedAt"></span></h1>
+    </div>
+
+    <!-- ====== 决策图表置顶 ====== -->
+    <div class="card col-12">
+      <div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">
+        <div class="k">Decision Signals · 来自 logs/ai_decision_log.csv</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <label class="k" style="margin-right:4px">Symbol</label>
+          <select id="symSel" class="btn" style="min-width:140px"></select>
+        </div>
+        <div class="k" id="csvUpdated">last: —</div>
+      </div>
+      <div class="k" id="csvHint" style="margin-top:4px">如果一直是 "—"，请确认后端已暴露 <code>/logs/ai_decision_log.csv</code>，且通过
+        HTTP 打开本页。</div>
+      <div class="chart-container-price"><canvas id="priceChart"></canvas></div>
+      <div class="chart-container-indi"><canvas id="indiChart"></canvas></div>
+    </div>
 
     <!-- 顶部概览 -->
     <div class="card col-4">
-      <div class="row"><div class="k">引擎模式</div><div id="engineMode" class="pill on">TEST_MODE</div></div>
-      <div class="row"><div class="k">调用次数</div><div class="v" id="invocations">-</div></div>
-      <div class="row"><div class="k">账户权益</div><div class="v" id="equity">-</div></div>
+      <div class="row">
+        <div class="k">引擎模式</div>
+        <div id="engineMode" class="pill on">TEST_MODE</div>
+      </div>
+      <div class="row">
+        <div class="k">调用次数</div>
+        <div class="v" id="invocations">-</div>
+      </div>
+      <div class="row">
+        <div class="k">账户权益</div>
+        <div class="v" id="equity">-</div>
+      </div>
     </div>
 
     <div class="card col-4">
-      <div class="row"><div class="k">最近决策</div><div class="v" id="decisionMain">-</div></div>
-      <div class="row"><div class="k">信心(0~1)</div><div class="v" id="decisionConf">-</div></div>
-      <div class="row"><div class="k">跟踪标的</div><div class="v" id="mkSymbol">-</div></div>
+      <div class="row">
+        <div class="k">最近决策</div>
+        <div class="v" id="decisionMain">-</div>
+      </div>
+      <div class="row">
+        <div class="k">信心(0~1)</div>
+        <div class="v" id="decisionConf">-</div>
+      </div>
+      <div class="row">
+        <div class="k">跟踪标的</div>
+        <div class="v" id="mkSymbol">-</div>
+      </div>
     </div>
 
     <div class="card col-4">
-      <div class="row"><div class="k">24h 波动率</div><div class="v" id="mkVol">-</div></div>
-      <div class="row"><div class="k">全局冷却模式</div><div class="v" id="cdMode">-</div></div>
-      <div class="row"><div class="k">冷却剩余</div><div class="v" id="cdRemain">-</div></div>
+      <div class="row">
+        <div class="k">24h 波动率</div>
+        <div class="v" id="mkVol">-</div>
+      </div>
+      <div class="row">
+        <div class="k">全局冷却模式</div>
+        <div class="v" id="cdMode">-</div>
+      </div>
+      <div class="row">
+        <div class="k">冷却剩余</div>
+        <div class="v" id="cdRemain">-</div>
+      </div>
       <div class="bar" title="冷却进度（剩余/总时长）"><i id="cdBar" style="width:0%"></i></div>
     </div>
 
     <!-- 灰度智能解锁 -->
     <div class="card col-12">
       <div class="row">
-        <div><div class="k">灰度智能解锁（仅提示，不执行）</div></div>
         <div>
-          <button class="btn" onclick="fetchStatus(true)">手动刷新</button>
+          <div class="k">灰度智能解锁（仅提示，不执行）</div>
         </div>
+        <div><button class="btn" onclick="fetchStatus(true)">手动刷新</button></div>
       </div>
       <div class="row">
         <div id="unlockPill" class="pill off">不建议提前解锁</div>
@@ -73,108 +275,232 @@
       <div class="mono" id="rawJson" style="white-space:pre;overflow:auto;max-height:260px;margin-top:8px;"></div>
     </div>
 
-    <!-- 最近信号/成交（可选：调用后端已有接口） -->
+    <!-- 最近信号/成交（可选） -->
     <div class="card col-6">
-      <div class="row"><div class="k">Recent Signals</div></div>
+      <div class="row">
+        <div class="k">Recent Signals</div>
+      </div>
       <table class="table" id="signalsTable">
-        <thead><tr><th>时间</th><th>币种</th><th>信号</th><th class="right">数量</th></tr></thead>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>币种</th>
+            <th>信号</th>
+            <th class="right">数量</th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>
-
     <div class="card col-6">
-      <div class="row"><div class="k">Recent Trades</div></div>
+      <div class="row">
+        <div class="k">Recent Trades</div>
+      </div>
       <table class="table" id="tradesTable">
-        <thead><tr><th>时间</th><th>币种</th><th>方向</th><th class="right">数量</th></tr></thead>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>币种</th>
+            <th>方向</th>
+            <th class="right">数量</th>
+          </tr>
+        </thead>
         <tbody></tbody>
       </table>
     </div>
   </div>
 
   <script>
-    const fmtUsd = v => (v==null?'-':Number(v).toLocaleString(undefined,{maximumFractionDigits:2}));
-    const fmtPct = v => (v==null?'-':(Number(v)*100).toFixed(2)+'%');
+    const fmtUsd = v => (v == null ? '-' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+    const fmtPct = v => (v == null ? '-' : (Number(v) * 100).toFixed(2) + '%');
     const el = id => document.getElementById(id);
 
-    async function fetchJson(url){
-      const r = await fetch(url, {cache:'no-cache'});
-      return await r.json();
-    }
+    async function fetchJson(url) { const r = await fetch(url, { cache: 'no-cache' }); return await r.json(); }
 
-    function setPill(id, on, text, level){
+    function setPill(id, on, text, level) {
       const p = el(id);
-      p.className = 'pill ' + (on ? (level==='strong'?'on':'warn') : 'off');
+      p.className = 'pill ' + (on ? (level === 'strong' ? 'on' : 'warn') : 'off');
       p.textContent = text;
     }
-
-    function setBar(id, remain, total){
+    function setBar(id, remain, total) {
       const b = el(id);
-      if(!total || total<=0){ b.style.width='0%'; return; }
-      const pct = Math.max(0, Math.min(100, (remain/total)*100));
-      b.style.width = pct.toFixed(1)+'%';
+      if (!total || total <= 0) { b.style.width = '0%'; return; }
+      const pct = Math.max(0, Math.min(100, (remain / total) * 100));
+      b.style.width = pct.toFixed(1) + '%';
+    }
+    function fillTable(id, items, map) {
+      const tb = document.querySelector('#' + id + ' tbody');
+      tb.innerHTML = (items || []).map(map).join('') || '<tr><td colspan="4" class="muted">无数据</td></tr>';
     }
 
-    function fillTable(id, items, map){
-      const tb = document.querySelector('#'+id+' tbody');
-      tb.innerHTML = (items||[]).map(map).join('') || '<tr><td colspan="4" class="muted">无数据</td></tr>';
-    }
-
-    async function fetchSignals(){
-      const data = await fetchJson('/recent/signals?limit=10').catch(()=>({items:[]}));
+    async function fetchSignals() {
+      const data = await fetchJson('/recent/signals?limit=10').catch(() => ({ items: [] }));
       fillTable('signalsTable', data.items, x =>
-        `<tr><td>${x.ts||'-'}</td><td>${x.coin||'-'}</td><td>${x.signal||'-'}</td><td class="right">${x.quantity??'-'}</td></tr>`
+        `<tr><td>${x.ts || '-'}</td><td>${x.coin || '-'}</td><td>${x.signal || '-'}</td><td class="right">${x.quantity ?? '-'}</td></tr>`
       );
     }
-
-    async function fetchTrades(){
-      const data = await fetchJson('/recent/trades?limit=10').catch(()=>({items:[]}));
+    async function fetchTrades() {
+      const data = await fetchJson('/recent/trades?limit=10').catch(() => ({ items: [] }));
       fillTable('tradesTable', data.items, x =>
-        `<tr><td>${x.ts||'-'}</td><td>${x.symbol||x.coin||'-'}</td><td>${x.side||'-'}</td><td class="right">${x.size??'-'}</td></tr>`
+        `<tr><td>${x.ts || '-'}</td><td>${x.symbol || x.coin || '-'}</td><td>${x.side || '-'}</td><td class="right">${x.size ?? '-'}</td></tr>`
       );
     }
-
-    async function fetchStatus(force=false){
-      const s = await fetchJson('/ai/status').catch(()=>({status:'error'}));
-      if(!s || s.status==='empty'){
-        el('updatedAt').textContent = ' · 等待引擎写入状态...';
-        return;
-      }
+    async function fetchStatus(force = false) {
+      const s = await fetchJson('/ai/status').catch(() => ({ status: 'error' }));
+      if (!s || s.status === 'empty') { el('updatedAt').textContent = ' · 等待引擎写入状态...'; return; }
       el('updatedAt').textContent = ' · 更新于 ' + (new Date(s.updated_at)).toLocaleString();
       el('engineMode').textContent = s.engine?.test_mode ? 'TEST_MODE' : 'LIVE_MODE';
       el('invocations').textContent = s.engine?.invocations ?? '-';
       el('equity').textContent = '$' + fmtUsd(s.account?.equity);
-
-      const d = s.decision||{};
-      el('decisionMain').textContent = d.symbol ? `${d.side||'-'}  ${d.symbol}` : '—';
-      el('decisionConf').textContent = d.confidence==null ? '-' : (Number(d.confidence).toFixed(2));
+      const d = s.decision || {};
+      el('decisionMain').textContent = d.symbol ? `${d.side || '-'}  ${d.symbol}` : '—';
+      el('decisionConf').textContent = d.confidence == null ? '-' : (Number(d.confidence).toFixed(2));
       el('mkSymbol').textContent = s.market?.symbol || '-';
-      el('mkVol').textContent = s.market?.volatility_24h_pct==null ? '-' : fmtPct(s.market.volatility_24h_pct);
-
+      el('mkVol').textContent = s.market?.volatility_24h_pct == null ? '-' : fmtPct(s.market.volatility_24h_pct);
       const cd = s.risk?.cooldown || {};
       el('cdMode').textContent = cd.mode || '-';
-      el('cdRemain').textContent = `${cd.remaining_seconds??0}s / ${cd.cooldown_seconds??0}s`;
-      setBar('cdBar', cd.remaining_seconds||0, cd.cooldown_seconds||0);
-
-      const gu = s.gray_unlock || {suggested:false};
-      setPill('unlockPill', gu.suggested, gu.suggested ? (gu.level==='strong'?'强烈建议提前解锁':'建议提前解锁') : '不建议提前解锁', gu.level);
+      el('cdRemain').textContent = `${cd.remaining_seconds ?? 0}s / ${cd.cooldown_seconds ?? 0}s`;
+      setBar('cdBar', cd.remaining_seconds || 0, cd.cooldown_seconds || 0);
+      const gu = s.gray_unlock || { suggested: false };
+      setPill('unlockPill', gu.suggested, gu.suggested ? (gu.level === 'strong' ? '强烈建议提前解锁' : '建议提前解锁') : '不建议提前解锁', gu.level);
       el('unlockReason').textContent = gu.reason || '-';
-
-      // 原始 JSON 展示
       el('rawJson').textContent = JSON.stringify(s, null, 2);
-
-      // 同步最近信号/成交
-      if(force){ await Promise.all([fetchSignals(), fetchTrades()]); }
+      if (force) { await Promise.all([fetchSignals(), fetchTrades()]); }
     }
 
-    // 首次加载与定时刷新
+    // ====== 决策 CSV 部分 ======
+    const css = getComputedStyle(document.documentElement);
+    const C = { grid: '#222d4a', text: css.getPropertyValue('--muted') || '#8aa0c5', line: '#5ae0a3', warn: '#ffd166', danger: '#ff6b6b', panel: '#12182a', accent: '#5ae0a3' };
+    let priceChart = null, indiChart = null, _csvRecords = [], _symbol = null;
+
+    async function fetchDecisionCsv() {
+      try {
+        const r = await fetch('/logs/ai_decision_log.csv', { cache: 'no-cache' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const txt = await r.text();
+        if (!txt || !txt.trim()) { throw new Error('empty csv'); }
+        el('csvUpdated').textContent = 'last: ' + new Date().toLocaleString();
+        el('csvHint').textContent = '数据每15秒自动刷新';
+        return parseCsv(txt);
+      } catch (e) {
+        el('csvUpdated').textContent = 'last: —';
+        el('csvHint').textContent = '未能读取 CSV：请确认 /logs/ai_decision_log.csv 路由存在，且通过 http:// 访问本页（不要用 file://）。';
+        return [];
+      }
+    }
+    function parseCsv(text) {
+      const lines = text.trim().split(/\r?\n/);
+      if (lines.length <= 1) return [];
+      const headers = splitCsvLine(lines[0]);
+      return lines.slice(1).map(line => {
+        const cols = splitCsvLine(line);
+        const obj = {}; headers.forEach((h, i) => obj[h] = cols[i] !== undefined ? unquote(cols[i]) : '');
+        obj.ts = new Date(obj.ts || obj.timestamp || obj.date || Date.now());
+        if (obj.price != null && obj.price !== '') obj.price = Number(obj.price);
+        ['confidence', 'stop_loss_pct', 'take_profit_pct', 'adx14', 'rsi14', 'macd'].forEach(k => {
+          if (obj[k] != null && obj[k] !== '') obj[k] = Number(obj[k]);
+        });
+        obj.symbol = obj.symbol || obj.coin || '';
+        obj.side = (obj.side || '').toLowerCase();
+        return obj;
+      });
+    }
+    function splitCsvLine(line) { const re = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/g; return line.split(re).map(s => s.trim()); }
+    function unquote(s) { if (s == null) return s; if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1).replace(/""/g, '"'); return s; }
+    function uniq(arr) { return Array.from(new Set(arr)); }
+    function fillSymbolOptions(records) {
+      const sel = el('symSel');
+      const syms = uniq(records.map(x => x.symbol).filter(Boolean));
+      sel.innerHTML = syms.map(s => `<option value="${s}">${s}</option>`).join('') || '<option value="">—</option>';
+      if (!_symbol || !syms.includes(_symbol)) _symbol = syms[0] || '';
+      sel.value = _symbol;
+      sel.onchange = () => { _symbol = sel.value; renderCharts(); };
+    }
+    function dataBySymbol(records, sym) { return records.filter(r => r.symbol === sym).sort((a, b) => a.ts - b.ts); }
+
+    function renderCharts() {
+      if (!_symbol) { destroyCharts(); return; }
+      const recs = dataBySymbol(_csvRecords, _symbol);
+      if (recs.length === 0) { destroyCharts(); return; }
+      const xyPrice = recs.map(r => ({ x: r.ts, y: r.price }));
+      const buys = recs.filter(r => r.side === 'buy').map(r => ({ x: r.ts, y: r.price }));
+      const sells = recs.filter(r => r.side === 'sell').map(r => ({ x: r.ts, y: r.price }));
+      const holds = recs.filter(r => r.side === 'hold').map(r => ({ x: r.ts, y: r.price }));
+      const rsi = recs.map(r => ({ x: r.ts, y: r.rsi14 ?? null }));
+      const adx = recs.map(r => ({ x: r.ts, y: r.adx14 ?? null }));
+      const priceCfg = {
+        type: 'line',
+        data: {
+          datasets: [
+            { label: `${_symbol} · Price (at decision)`, data: xyPrice, borderColor: C.line, borderWidth: 2, pointRadius: 0, tension: 0.25 },
+            { label: 'BUY', type: 'scatter', data: buys, pointRadius: 5, borderColor: C.accent, backgroundColor: C.accent, pointStyle: 'triangle', rotation: 0 },
+            { label: 'SELL', type: 'scatter', data: sells, pointRadius: 5, borderColor: C.danger, backgroundColor: C.danger, pointStyle: 'triangle', rotation: 180 },
+            { label: 'HOLD', type: 'scatter', data: holds, pointRadius: 4, borderColor: C.warn, backgroundColor: C.warn, pointStyle: 'circle' }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            x: { type: 'time', time: { unit: 'hour' }, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
+            y: { ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } }
+          },
+          plugins: {
+            legend: { labels: { color: C.text, font: { size: 11 } } },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const d = ctx.raw || {}; const side = ctx.dataset.label; const t = new Date(d.x).toLocaleString();
+                  return `${side || 'Price'} · ${t} · ${d.y}`;
+                }
+              }
+            }
+          }
+        }
+      };
+      const indiCfg = {
+        type: 'line',
+        data: {
+          datasets: [
+            { label: 'RSI(14)', data: rsi, borderColor: '#4fc3f7', borderWidth: 1.5, pointRadius: 1.5, yAxisID: 'y' },
+            { label: 'ADX(14)', data: adx, borderColor: '#f78fb3', borderWidth: 1.5, pointRadius: 1.5, yAxisID: 'y1' }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: {
+            x: { type: 'time', time: { unit: 'hour' }, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
+            y: { position: 'left', min: 0, max: 100, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
+            y1: { position: 'right', min: 0, max: 60, ticks: { color: C.text, font: { size: 10 } }, grid: { drawOnChartArea: false, color: C.grid } }
+          },
+          plugins: { legend: { labels: { color: C.text, font: { size: 11 } } } }
+        }
+      };
+      destroyCharts();
+      priceChart = new Chart(el('priceChart').getContext('2d'), priceCfg);
+      indiChart = new Chart(el('indiChart').getContext('2d'), indiCfg);
+    }
+    function destroyCharts() { try { priceChart && priceChart.destroy(); } catch { } try { indiChart && indiChart.destroy(); } catch { } priceChart = null; indiChart = null; }
+
+    async function loadCsvAndRender() {
+      const recs = await fetchDecisionCsv();
+      _csvRecords = recs;
+      if (!_csvRecords.length) { destroyCharts(); fillSymbolOptions([]); return; }
+      fillSymbolOptions(_csvRecords);
+      renderCharts();
+    }
+
+    // ===== 首次加载与定时刷新 =====
     (async () => {
       await fetchStatus(true);
       await fetchSignals();
       await fetchTrades();
+      await loadCsvAndRender();
       setInterval(fetchStatus, 3000);
       setInterval(fetchSignals, 5000);
       setInterval(fetchTrades, 5000);
+      setInterval(loadCsvAndRender, 15000); // 每15秒刷新一次CSV
     })();
   </script>
 </body>
+
 </html>
