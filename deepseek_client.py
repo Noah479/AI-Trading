@@ -114,17 +114,20 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
 
     system_prompt = (
         "你是一名专业量化交易AI。请在给定账户信息、市场快照与技术指标下，为“最有潜力”的**单一**交易对生成**严格JSON**决策。\n"
+        "我会给出多个交易对（BTC、ETH、SOL、BNB、XRP、DOGE）的实时指标，包括EMA、RSI、MACD、ADX、BOLL、ATR等。\n"
+        "你的任务是：从这些币种中选出最有潜力的一个，并做出交易决策。\n\n"
         "\n"
         "【硬性格式要求】\n"
-        "1) 只在最终 **message.content** 输出完整JSON，禁止在 reasoning_content 输出；禁止任何解释文字、注释或多余字符。\n"
+        "1) 在 extended thinking 中完成推理，最终在 message.content 输出完整JSON（无额外文字）"
         "2) JSON 架构：\n"
         "   {\"version\":\"1.0\",\"decision\":{\n"
         "      \"symbol\":\"<符号>\",\n"
         "      \"side\":\"buy|sell|hold\",\n"
         "      \"order_type\":\"market|limit\",\n"
+        "      \"leverage\":<float>,\n"                           
         "      \"max_slippage_bps\":<int>,\n"
         "      \"risk\":{\"stop_loss_pct\":<float>,\"take_profit_pct\":<float>},\n"
-        "      \"confidence\":<0..1 的小数>,\n"
+        "      \"confidence\":<0..1.5 的小数>,\n"                  
         "      \"rationale\":\"≤30字中文理由\"\n"
         "   },\"ts\":\"ISO-8601\"}\n"
         "3) 仅输出一个 symbol；所有数值必须是裸数（不带单位/百分号/区间）。\n"
@@ -135,6 +138,8 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "- technical_indicators[sym]（可能部分缺失）：ema_fast, ema_slow, rsi14, atr14, macd, macd_signal, adx14, boll_upper, boll_mid, boll_lower；\n"
         "- constraints.risk_limits.max_slippage_bps（上限），constraints.symbols（允许交易列表），symbol_rules（精度/步长）。\n"
         "technical_indicators[sym].tf_4h 为 4h 背景指标；以 30m 为执行基线，以 4h 作为趋势过滤/增强：同向放大分数，反向减弱甚至观望。"
+        " - 如果行情波动太大或信号不明，请选择 hold。"
+        " - leverage 可根据信心自由决定（系统会自动封顶 25x）。"
         "\n"
         "【计算辅助量】（缺失则跳过或取安全默认）\n"
         "- pos24 = (last - low24h) / max(1e-9, high24h - low24h)，缺失用 0.5；\n"
@@ -185,7 +190,7 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "  • 基础：buy/sell=0.55，hold=0.50；\n"
         "  • 每项强一致性(+EMA多头且MACD>signal；或 金叉/死叉；或 RSI处于[55,65]/[35,45]之外的强区间) +0.05；\n"
         "  • 每项明显冲突 -0.05；adx14>30 +0.05；adx14≤18 -0.05；atr_pct>0.05 -0.05；\n"
-        "  • 结果四舍五入到小数点后2位，限制在[0,1]。\n"
+        "  • 结果四舍五入到小数点后2位，限制在[0,1.5]。\n"
         "- rationale：用不超过30字的**中文**给出主因（如“MACD金叉+ADX走强”或“ADX<20震荡观望”）。\n"
         "\n"
         "【健壮性与回退】\n"
@@ -195,6 +200,7 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "\n"
         "【最终提醒】\n"
         "- 只输出**一个**严格JSON对象到 content；不得额外输出任何文字。\n"
+        "请只输出一个严格的 JSON 对象，而不是列表。"
     )
 
     indicators = {}
@@ -202,7 +208,7 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         row = market.get(sym) or {}
         ctx4h = (row.get("tf") or {}).get("4h", {})
         indicators[sym] = {
-            # 30m 基线（扁平，ai_trader 已填好）
+            # === 30m 基线 ===
             "ema_fast": row.get("ema_fast"),
             "ema_slow": row.get("ema_slow"),
             "rsi14":    row.get("rsi14"),
@@ -213,19 +219,18 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
             "boll_upper":   row.get("boll_upper"),
             "boll_mid":     row.get("boll_mid"),
             "boll_lower":   row.get("boll_lower"),
-            # 4h 背景
-            "tf_4h": {
-                "ema_fast": ctx4h.get("ema_fast"),
-                "ema_slow": ctx4h.get("ema_slow"),
-                "rsi14":    ctx4h.get("rsi14"),
-                "atr14":    ctx4h.get("atr14"),
-                "macd":         ctx4h.get("macd"),
-                "macd_signal":  ctx4h.get("macd_signal"),
-                "adx14":        ctx4h.get("adx14"),
-                "boll_upper":   ctx4h.get("boll_upper"),
-                "boll_mid":     ctx4h.get("boll_mid"),
-                "boll_lower":   ctx4h.get("boll_lower"),
-            }
+
+            # === 4h 背景趋势 ===
+            "ema_fast_4h":  ctx4h.get("ema_fast"),
+            "ema_slow_4h":  ctx4h.get("ema_slow"),
+            "rsi14_4h":     ctx4h.get("rsi14"),
+            "atr14_4h":     ctx4h.get("atr14"),
+            "macd_4h":      ctx4h.get("macd"),
+            "macd_signal_4h": ctx4h.get("macd_signal"),
+            "adx14_4h":     ctx4h.get("adx14"),
+            "boll_upper_4h":ctx4h.get("boll_upper"),
+            "boll_mid_4h":  ctx4h.get("boll_mid"),
+            "boll_lower_4h":ctx4h.get("boll_lower"),
         }
 
 
@@ -244,9 +249,10 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
                     "symbol": "BTC-USDT",
                     "side": "buy|sell|hold",
                     "order_type": "market|limit",
+                    "leverage": "float",  
+                    "confidence": "0.0~1.5", 
                     "max_slippage_bps": "int",
                     "risk": {"stop_loss_pct": "0.0~0.05", "take_profit_pct": "0.0~0.1"},
-                    "confidence": "0.0~1.0",
                     "rationale": "≤30字简短理由"
                 },
                 "ts": "ISO-8601"
@@ -254,6 +260,13 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
             "format_rule": "仅输出严格 JSON；不要解释；不要思维链。"
         }
     }
+
+    # === ✅ 在这里添加说明 ===
+    user_payload["instruction"] = (
+        "分析上述多个交易对的指标，比较它们的趋势强度与风险，"
+        "从中选出最具潜力的1个币种，并给出 buy/sell/hold 决策与杠杆倍数（最大25倍）。"
+        "请以JSON格式输出，字段包括 symbol、side、leverage、risk、confidence、rationale。"
+    )
 
     return [
         {"role": "system", "content": system_prompt},
@@ -435,6 +448,16 @@ def _clip(x, lo, hi):
         return max(lo, min(x, hi))
 
 def _normalize_decision(decision: dict, market: dict) -> dict:
+    # --- 容错处理 ---
+    if decision is None:
+        decision = {}
+    elif isinstance(decision, list):
+        # 有些模型输出 [ {...} ] 形式
+        decision = decision[0] if decision else {}
+
+    if not isinstance(decision, dict):
+        raise TypeError(f"decision must be dict, got {type(decision)}")
+    
     d = (decision or {}).get("decision", {}) or {}
 
     # --- 符号 ---
@@ -450,12 +473,13 @@ def _normalize_decision(decision: dict, market: dict) -> dict:
     sl = _to_float(risk.get("stop_loss_pct"), default=0.01)     # 默认 1% 止损
     tp = _to_float(risk.get("take_profit_pct"), default=0.02)   # 默认 2% 止盈
     conf = _to_float(d.get("confidence"), default=0.6)
+    lev  = _to_float(d.get("leverage"),  default=None)
 
     # --- 边界裁剪 ---
     max_slip = int(_clip(max_slip, 1, 200))       # 1 ~ 200 bps
     sl = _clip(sl, 0.0, 0.20)                     # 0 ~ 20%
     tp = _clip(tp, 0.0, 0.50)                     # 0 ~ 50%
-    conf = _clip(conf, 0.0, 1.0)                  # 0 ~ 1
+    conf = _clip(conf, 0.0, 1.5) # 上界改为 1.5（与 prompt 一致）
 
     # --- 理由 ---
     rationale = d.get("rationale") or d.get("reason") or "无"
@@ -474,9 +498,11 @@ def _normalize_decision(decision: dict, market: dict) -> dict:
             "max_slippage_bps": max_slip,
             "risk": {"stop_loss_pct": sl, "take_profit_pct": tp},
             "confidence": conf,
+            "leverage": lev,  # 新增：把 leverage 放进标准化结果
             "rationale": rationale
         },
-        "ts": decision.get("ts") or datetime.now(timezone.utc).isoformat()
+         # ✅ 强制用当前 UTC 时间，避免模型旧 ts 滞留
+        "ts": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     }
 
     # --- 调试：如出现模板占位被更正，打印一次（便于定位） ---

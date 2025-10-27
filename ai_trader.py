@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from deepseek_client import get_decision
 from risk_manager import RiskManager, RiskConfig, SymbolRule
 
+import random
 import talib
 import numpy as np
 import pandas as pd
@@ -14,6 +15,12 @@ from pathlib import Path
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 AI_STATUS_FILE = LOG_DIR / "ai_status.json"
+
+
+# ====== 自适应触发节奏（可调） ======
+DYN_BASE_SEC = 45 * 60        # 基准间隔 45 分钟
+DYN_MIN_SEC  = 5 * 60         # 最短 5 分钟（再短易抖动）
+DYN_MAX_SEC  = 2 * 60 * 60    # 最长 2 小时（避免过久不评估）
 
 def _to_float(x, default=None):
     try:
@@ -360,6 +367,7 @@ def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs
         "symbol": sym,
         "side": d.get("side"),
         "confidence": d.get("confidence"),
+        "leverage": d.get("leverage"), 
         "rationale": d.get("rationale"),
         "stop_loss_pct": (d.get("risk") or {}).get("stop_loss_pct"),
         "take_profit_pct": (d.get("risk") or {}).get("take_profit_pct"),
@@ -402,12 +410,61 @@ def compute_local_signal(market: dict):
             best = (sym, side, score)
     return best
 
+def _dynamic_ai_interval_secs(row: dict, ctx4h: dict=None, in_pos: bool=False) -> int:
+    """
+    根据 30m/4h 指标与持仓状态，返回下一次针对该币触发 AI 的动态秒数。
+    规则（乘法叠加，最后夹在 [DYN_MIN_SEC, DYN_MAX_SEC]）：
+      - 趋势强(ADX↑) → 缩短
+      - 波动大(vol24↑) → 拉长（避免追涨杀跌）
+      - RSI 极值(>70 或 <30) → 缩短（更关注极端）
+      - 4h 强势 → 略缩短
+      - 有持仓 → 明显缩短（更密切盯盘）
+      - 加 ±15% 抖动，避免固定节奏
+    """
+    base = float(DYN_BASE_SEC)
+
+    adx   = float(row.get("adx14") or 0.0)
+    rsi   = float(row.get("rsi14") or 50.0)
+    vol24 = _vol24_from_market_row(row) or 0.0  # (high-low)/last
+    adx4h = float((ctx4h or {}).get("adx14") or 0.0)
+
+    # 1) ADX：0~50 常见，越大越强，区间映射到 0.4~1.2
+    adx_factor = max(0.4, min(1.2, 1.2 - 0.02 * min(adx, 50)))  # adx=30 → 0.6，adx=40 → 0.4
+
+    # 2) 波动率：>5% 拉长 1.4；<2% 略缩 0.9
+    if vol24 >= 0.05:
+        vol_factor = 1.4
+    elif vol24 <= 0.02:
+        vol_factor = 0.9
+    else:
+        vol_factor = 1.0
+
+    # 3) RSI 极值/中性
+    if rsi >= 70 or rsi <= 30:
+        rsi_factor = 0.8   # 极端 → 关注更密
+    elif 45 <= rsi <= 55:
+        rsi_factor = 1.1   # 中性 → 放宽一点
+    else:
+        rsi_factor = 1.0
+
+    # 4) 4h 背景趋势：强则再缩短一点
+    tf_factor = 0.9 if adx4h >= 25 else 1.0
+
+    # 5) 有持仓则更密（例如 0.7）
+    pos_factor = 0.7 if in_pos else 1.0
+
+    # 6) 少许抖动 ±15%
+    jitter = 1.0 + (random.random() - 0.5) * 0.30
+
+    sec = base * adx_factor * vol_factor * rsi_factor * tf_factor * pos_factor * jitter
+    return int(max(DYN_MIN_SEC, min(DYN_MAX_SEC, sec)))
+
 
 def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs"):
     os.makedirs(log_dir, exist_ok=True)
     file_path = os.path.join(log_dir, "ai_decision_log.csv")
     headers = [
-        "ts","symbol","side","confidence","rationale",
+        "ts","symbol","side","confidence","rationale","leverage",
         "stop_loss_pct","take_profit_pct","adx14","rsi14","macd","price"
     ]
 
@@ -420,6 +477,7 @@ def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs
         "symbol": sym,
         "side": d.get("side"),
         "confidence": d.get("confidence"),
+        "leverage": d.get("leverage"),
         "rationale": d.get("rationale"),
         "stop_loss_pct": (d.get("risk") or {}).get("stop_loss_pct"),
         "take_profit_pct": (d.get("risk") or {}).get("take_profit_pct"),
@@ -455,6 +513,15 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
     
     decision, meta = get_decision(market, bal_snapshot, recent_trades=[], constraints=constraints)
     
+    d = decision.get("decision", {})
+    conf = float(d.get("confidence") or 0.5)
+    lev  = d.get("leverage")
+    if lev is None:
+        base = 1.0 + (conf - 0.5) * 8.0
+        lev  = max(0.5, min(25.0, base))
+    d["leverage"] = round(float(lev), 2)
+    progress.substep(f"📈 自动分配杠杆: {d['leverage']:.2f}x（置信度 {conf:.2f}）")
+
     ai_time = time.time() - start_ai
 
         # ✅ 修改判断逻辑
@@ -645,8 +712,9 @@ def main_once():
 
 
 if __name__ == "__main__":
-    MIN_AI_INTERVAL_SEC = 15*60     # 最短15分钟
-    MAX_AI_INTERVAL_SEC = 60*60     # 最长60分钟（超时也要跑一次）
+    BASE_INTERVAL = 30 * 60       # 平均间隔 30 分钟
+    MIN_AI_INTERVAL_SEC = 5 * 60  # 最快 5 分钟
+    MAX_AI_INTERVAL_SEC = 2 * 60 * 60  # 最慢 2 小时
     last_sig = None
     last_call_ts = 0
 
@@ -659,15 +727,25 @@ if __name__ == "__main__":
             sig = f"{sym}:{side}:{round(score,2)}"
             now = time.time()
 
-            need_call = (sig != last_sig) or ((now - last_call_ts) > MAX_AI_INTERVAL_SEC)
-            recently_called = (now - last_call_ts) < MIN_AI_INTERVAL_SEC
+            # === 动态计算下次触发间隔 ===
+            adx = market.get(sym, {}).get("adx14", 20)
+            rsi = market.get(sym, {}).get("rsi14", 50)
+            # 趋势强 or RSI 极端 → 缩短；震荡 → 拉长
+            factor = 0.7 if (adx > 30 or rsi > 70 or rsi < 30) else (1.3 if adx < 20 else 1.0)
+            jitter = 1.0 + (random.random() - 0.5) * 0.3
+            dyn_interval = max(MIN_AI_INTERVAL_SEC, min(MAX_AI_INTERVAL_SEC, BASE_INTERVAL * factor * jitter))
 
-            progress.substep(f"[事件检测] signal={sig}, last={last_sig}, "
-                             f"need_call={need_call}, recently_called={recently_called}")
+            need_call = (sig != last_sig) or ((now - last_call_ts) > dyn_interval)
+            recently_called = (now - last_call_ts) < (dyn_interval * 0.5)
+
+            progress.substep(
+                f"[事件检测] signal={sig}, dyn_interval={int(dyn_interval)}s, "
+                f"last_call={int(now - last_call_ts)}s ago, need_call={need_call}"
+            )
 
             if need_call and not recently_called:
-                progress.substep("🔔 触发 AI 决策（事件驱动）")
-                main_once()           # 复用你完整的一次流程（含风控/下单/日志）
+                progress.substep("🔔 触发 AI 决策（自适应节奏）")
+                main_once()
                 last_call_ts = now
                 last_sig = sig
             else:
@@ -676,4 +754,4 @@ if __name__ == "__main__":
         except Exception as e:
             progress.error(f"主循环异常: {e}")
 
-        time.sleep(60)  # 每分钟检测一次事件
+        time.sleep(60)

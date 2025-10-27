@@ -1,506 +1,688 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI 实时状态 · Alpha Arena</title>
-  <!-- Chart.js + 时间轴适配器（缺这个会导致time坐标不可用） -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
-  <style>
-    :root {
-      --bg: #0b1020;
-      --panel: #12182a;
-      --muted: #8aa0c5;
-      --accent: #5ae0a3;
-      --danger: #ff6b6b;
-      --warn: #ffd166;
-    }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Trading Status - 实时监控</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-    * {
-      box-sizing: border-box
-    }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
 
-    body {
-      margin: 0;
-      padding: 24px;
-      background: var(--bg);
-      color: #dfe7ff;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto
-    }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
 
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(12, 1fr);
-      gap: 16px
-    }
+        .header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
 
-    .card {
-      background: var(--panel);
-      border: 1px solid #1d2742;
-      border-radius: 12px;
-      padding: 16px
-    }
+        .header h1 {
+            color: #2d3748;
+            font-size: 28px;
+            font-weight: 700;
+        }
 
-    .col-4 {
-      grid-column: span 4
-    }
+        .controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
 
-    .col-6 {
-      grid-column: span 6
-    }
+        select, button {
+            padding: 10px 20px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: white;
+        }
 
-    .col-8 {
-      grid-column: span 8
-    }
+        select:hover, button:hover {
+            border-color: #667eea;
+        }
 
-    .col-12 {
-      grid-column: span 12
-    }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            font-weight: 600;
+        }
 
-    h1 {
-      margin: 0 0 12px;
-      font-size: 20px
-    }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
 
-    .k {
-      font-size: 12px;
-      color: var(--muted)
-    }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
 
-    .v {
-      font-weight: 700
-    }
+        .stat-card {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
 
-    .row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin: 6px 0
-    }
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0,0,0,0.15);
+        }
 
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: 12px
-    }
+        .stat-label {
+            color: #718096;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
 
-    .pill.on {
-      background: rgba(90, 224, 163, 0.12);
-      color: var(--accent);
-      border: 1px solid rgba(90, 224, 163, 0.35)
-    }
+        .stat-value {
+            color: #2d3748;
+            font-size: 28px;
+            font-weight: 700;
+        }
 
-    .pill.off {
-      background: rgba(255, 107, 107, 0.12);
-      color: var(--danger);
-      border: 1px solid rgba(255, 107, 107, 0.35)
-    }
+        .stat-value.positive {
+            color: #48bb78;
+        }
 
-    .pill.warn {
-      background: rgba(255, 209, 102, 0.12);
-      color: var(--warn);
-      border: 1px solid rgba(255, 209, 102, 0.35)
-    }
+        .stat-value.negative {
+            color: #f56565;
+        }
 
-    .muted {
-      color: var(--muted)
-    }
+        .chart-container {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            min-height: 400px;
+        }
 
-    .bar {
-      height: 10px;
-      background: #1e2741;
-      border-radius: 6px;
-      overflow: hidden
-    }
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
 
-    .bar>i {
-      display: block;
-      height: 100%;
-      background: linear-gradient(90deg, #4fc3f7, #5ae0a3)
-    }
+        .chart-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2d3748;
+        }
 
-    .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 12px
-    }
+        .time-selector {
+            display: flex;
+            gap: 10px;
+        }
 
-    .table {
-      width: 100%;
-      border-collapse: collapse
-    }
+        .time-btn {
+            padding: 8px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 6px;
+            background: white;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
 
-    .table th,
-    .table td {
-      padding: 8px;
-      border-bottom: 1px solid #222d4a;
-      font-size: 12px;
-      text-align: left
-    }
+        .time-btn.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-color: #667eea;
+        }
 
-    .right {
-      text-align: right
-    }
+        #priceChart {
+            width: 100%;
+            height: 400px;
+        }
 
-    .btn {
-      background: #223055;
-      border: 1px solid #2d3e66;
-      color: #dfe7ff;
-      border-radius: 8px;
-      padding: 8px 12px;
-      cursor: pointer
-    }
+        .signal-stats {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
 
-    .btn:active {
-      transform: translateY(1px)
-    }
+        #signalChart {
+            width: 100%;
+            height: 300px;
+        }
 
-    /* ✅ 图表容器高度调整 */
-    .chart-container-price {
-      height: 240px;
-      margin-top: 12px;
-    }
+        .table-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
 
-    .chart-container-indi {
-      height: 140px;
-      margin-top: 8px;
-    }
+        .table-section-small {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            max-height: 450px;
+            overflow-y: auto;
+            position: relative;
+        }
 
-    @media(max-width:980px) {
+        .table-section-small h3 {
+            color: #2d3748;
+            margin-bottom: 15px;
+            font-size: 16px;
+            font-weight: 600;
+        }
 
-      .col-4,
-      .col-6,
-      .col-8,
-      .col-12 {
-        grid-column: span 12
-      }
+        .table-section-small table {
+            width: 100%;
+            border-collapse: collapse;
+        }
 
-      .chart-container-price {
-        height: 200px;
-      }
+        .table-section-small table thead {
+            position: sticky;
+            top: 0;
+            background: white;
+            z-index: 10;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
 
-      .chart-container-indi {
-        height: 120px;
-      }
-    }
-  </style>
-</head>
+        .table-section-small th {
+            background: #f7fafc;
+            padding: 12px 8px;
+            text-align: left;
+            font-weight: 600;
+            color: #4a5568;
+            font-size: 13px;
+            border-bottom: 2px solid #e2e8f0;
+        }
 
-<body>
-  <div class="grid">
-    <div class="col-12">
-      <h1>AI 实时状态 · Alpha Arena <span class="k" id="updatedAt"></span></h1>
-    </div>
+        .table-section-small td {
+            padding: 12px 8px;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 13px;
+            color: #2d3748;
+        }
 
-    <!-- ====== 决策图表置顶 ====== -->
-    <div class="card col-12">
-      <div class="row" style="align-items:center;gap:12px;flex-wrap:wrap">
-        <div class="k">Decision Signals · 来自 logs/ai_decision_log.csv</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <label class="k" style="margin-right:4px">Symbol</label>
-          <select id="symSel" class="btn" style="min-width:140px"></select>
-        </div>
-        <div class="k" id="csvUpdated">last: —</div>
-      </div>
-      <div class="k" id="csvHint" style="margin-top:4px">如果一直是 "—"，请确认后端已暴露 <code>/logs/ai_decision_log.csv</code>，且通过
-        HTTP 打开本页。</div>
-      <div class="chart-container-price"><canvas id="priceChart"></canvas></div>
-      <div class="chart-container-indi"><canvas id="indiChart"></canvas></div>
-    </div>
+        .table-section-small tbody tr:hover {
+            background: #f7fafc;
+        }
 
-    <!-- 顶部概览 -->
-    <div class="card col-4">
-      <div class="row">
-        <div class="k">引擎模式</div>
-        <div id="engineMode" class="pill on">TEST_MODE</div>
-      </div>
-      <div class="row">
-        <div class="k">调用次数</div>
-        <div class="v" id="invocations">-</div>
-      </div>
-      <div class="row">
-        <div class="k">账户权益</div>
-        <div class="v" id="equity">-</div>
-      </div>
-    </div>
+        .signal-badge {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }
 
-    <div class="card col-4">
-      <div class="row">
-        <div class="k">最近决策</div>
-        <div class="v" id="decisionMain">-</div>
-      </div>
-      <div class="row">
-        <div class="k">信心(0~1)</div>
-        <div class="v" id="decisionConf">-</div>
-      </div>
-      <div class="row">
-        <div class="k">跟踪标的</div>
-        <div class="v" id="mkSymbol">-</div>
-      </div>
-    </div>
+        .signal-badge.entry {
+            background: #c6f6d5;
+            color: #22543d;
+        }
 
-    <div class="card col-4">
-      <div class="row">
-        <div class="k">24h 波动率</div>
-        <div class="v" id="mkVol">-</div>
-      </div>
-      <div class="row">
-        <div class="k">全局冷却模式</div>
-        <div class="v" id="cdMode">-</div>
-      </div>
-      <div class="row">
-        <div class="k">冷却剩余</div>
-        <div class="v" id="cdRemain">-</div>
-      </div>
-      <div class="bar" title="冷却进度（剩余/总时长）"><i id="cdBar" style="width:0%"></i></div>
-    </div>
+        .signal-badge.exit {
+            background: #fed7d7;
+            color: #742a2a;
+        }
 
-    <!-- 灰度智能解锁 -->
-    <div class="card col-12">
-      <div class="row">
-        <div>
-          <div class="k">灰度智能解锁（仅提示，不执行）</div>
-        </div>
-        <div><button class="btn" onclick="fetchStatus(true)">手动刷新</button></div>
-      </div>
-      <div class="row">
-        <div id="unlockPill" class="pill off">不建议提前解锁</div>
-        <div class="muted" id="unlockReason">-</div>
-      </div>
-      <div class="mono" id="rawJson" style="white-space:pre;overflow:auto;max-height:260px;margin-top:8px;"></div>
-    </div>
+        .signal-badge.hold {
+            background: #e2e8f0;
+            color: #2d3748;
+        }
 
-    <!-- 最近信号/成交（可选） -->
-    <div class="card col-6">
-      <div class="row">
-        <div class="k">Recent Signals</div>
-      </div>
-      <table class="table" id="signalsTable">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>币种</th>
-            <th>信号</th>
-            <th class="right">数量</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="card col-6">
-      <div class="row">
-        <div class="k">Recent Trades</div>
-      </div>
-      <table class="table" id="tradesTable">
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th>币种</th>
-            <th>方向</th>
-            <th class="right">数量</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
+        .direction-badge {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }
 
-  <script>
-    const fmtUsd = v => (v == null ? '-' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 }));
-    const fmtPct = v => (v == null ? '-' : (Number(v) * 100).toFixed(2) + '%');
-    const el = id => document.getElementById(id);
+        .direction-badge.BUY {
+            background: #c6f6d5;
+            color: #22543d;
+        }
 
-    async function fetchJson(url) { const r = await fetch(url, { cache: 'no-cache' }); return await r.json(); }
+        .direction-badge.SELL {
+            background: #fed7d7;
+            color: #742a2a;
+        }
 
-    function setPill(id, on, text, level) {
-      const p = el(id);
-      p.className = 'pill ' + (on ? (level === 'strong' ? 'on' : 'warn') : 'off');
-      p.textContent = text;
-    }
-    function setBar(id, remain, total) {
-      const b = el(id);
-      if (!total || total <= 0) { b.style.width = '0%'; return; }
-      const pct = Math.max(0, Math.min(100, (remain / total) * 100));
-      b.style.width = pct.toFixed(1) + '%';
-    }
-    function fillTable(id, items, map) {
-      const tb = document.querySelector('#' + id + ' tbody');
-      tb.innerHTML = (items || []).map(map).join('') || '<tr><td colspan="4" class="muted">无数据</td></tr>';
-    }
+        .last-update {
+            text-align: center;
+            color: #718096;
+            margin-top: 20px;
+            font-size: 14px;
+        }
 
-    async function fetchSignals() {
-      const data = await fetchJson('/recent/signals?limit=10').catch(() => ({ items: [] }));
-      fillTable('signalsTable', data.items, x =>
-        `<tr><td>${x.ts || '-'}</td><td>${x.coin || '-'}</td><td>${x.signal || '-'}</td><td class="right">${x.quantity ?? '-'}</td></tr>`
-      );
-    }
-    async function fetchTrades() {
-      const data = await fetchJson('/recent/trades?limit=10').catch(() => ({ items: [] }));
-      fillTable('tradesTable', data.items, x =>
-        `<tr><td>${x.ts || '-'}</td><td>${x.symbol || x.coin || '-'}</td><td>${x.side || '-'}</td><td class="right">${x.size ?? '-'}</td></tr>`
-      );
-    }
-    async function fetchStatus(force = false) {
-      const s = await fetchJson('/ai/status').catch(() => ({ status: 'error' }));
-      if (!s || s.status === 'empty') { el('updatedAt').textContent = ' · 等待引擎写入状态...'; return; }
-      el('updatedAt').textContent = ' · 更新于 ' + (new Date(s.updated_at)).toLocaleString();
-      el('engineMode').textContent = s.engine?.test_mode ? 'TEST_MODE' : 'LIVE_MODE';
-      el('invocations').textContent = s.engine?.invocations ?? '-';
-      el('equity').textContent = '$' + fmtUsd(s.account?.equity);
-      const d = s.decision || {};
-      el('decisionMain').textContent = d.symbol ? `${d.side || '-'}  ${d.symbol}` : '—';
-      el('decisionConf').textContent = d.confidence == null ? '-' : (Number(d.confidence).toFixed(2));
-      el('mkSymbol').textContent = s.market?.symbol || '-';
-      el('mkVol').textContent = s.market?.volatility_24h_pct == null ? '-' : fmtPct(s.market.volatility_24h_pct);
-      const cd = s.risk?.cooldown || {};
-      el('cdMode').textContent = cd.mode || '-';
-      el('cdRemain').textContent = `${cd.remaining_seconds ?? 0}s / ${cd.cooldown_seconds ?? 0}s`;
-      setBar('cdBar', cd.remaining_seconds || 0, cd.cooldown_seconds || 0);
-      const gu = s.gray_unlock || { suggested: false };
-      setPill('unlockPill', gu.suggested, gu.suggested ? (gu.level === 'strong' ? '强烈建议提前解锁' : '建议提前解锁') : '不建议提前解锁', gu.level);
-      el('unlockReason').textContent = gu.reason || '-';
-      el('rawJson').textContent = JSON.stringify(s, null, 2);
-      if (force) { await Promise.all([fetchSignals(), fetchTrades()]); }
-    }
-
-    // ====== 决策 CSV 部分 ======
-    const css = getComputedStyle(document.documentElement);
-    const C = { grid: '#222d4a', text: css.getPropertyValue('--muted') || '#8aa0c5', line: '#5ae0a3', warn: '#ffd166', danger: '#ff6b6b', panel: '#12182a', accent: '#5ae0a3' };
-    let priceChart = null, indiChart = null, _csvRecords = [], _symbol = null;
-
-    async function fetchDecisionCsv() {
-      try {
-        const r = await fetch('/logs/ai_decision_log.csv', { cache: 'no-cache' });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const txt = await r.text();
-        if (!txt || !txt.trim()) { throw new Error('empty csv'); }
-        el('csvUpdated').textContent = 'last: ' + new Date().toLocaleString();
-        el('csvHint').textContent = '数据每15秒自动刷新';
-        return parseCsv(txt);
-      } catch (e) {
-        el('csvUpdated').textContent = 'last: —';
-        el('csvHint').textContent = '未能读取 CSV：请确认 /logs/ai_decision_log.csv 路由存在，且通过 http:// 访问本页（不要用 file://）。';
-        return [];
-      }
-    }
-    function parseCsv(text) {
-      const lines = text.trim().split(/\r?\n/);
-      if (lines.length <= 1) return [];
-      const headers = splitCsvLine(lines[0]);
-      return lines.slice(1).map(line => {
-        const cols = splitCsvLine(line);
-        const obj = {}; headers.forEach((h, i) => obj[h] = cols[i] !== undefined ? unquote(cols[i]) : '');
-        obj.ts = new Date(obj.ts || obj.timestamp || obj.date || Date.now());
-        if (obj.price != null && obj.price !== '') obj.price = Number(obj.price);
-        ['confidence', 'stop_loss_pct', 'take_profit_pct', 'adx14', 'rsi14', 'macd'].forEach(k => {
-          if (obj[k] != null && obj[k] !== '') obj[k] = Number(obj[k]);
-        });
-        obj.symbol = obj.symbol || obj.coin || '';
-        obj.side = (obj.side || '').toLowerCase();
-        return obj;
-      });
-    }
-    function splitCsvLine(line) { const re = /,(?=(?:(?:[^"]*"){2})*[^"]*$)/g; return line.split(re).map(s => s.trim()); }
-    function unquote(s) { if (s == null) return s; if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1).replace(/""/g, '"'); return s; }
-    function uniq(arr) { return Array.from(new Set(arr)); }
-    function fillSymbolOptions(records) {
-      const sel = el('symSel');
-      const syms = uniq(records.map(x => x.symbol).filter(Boolean));
-      sel.innerHTML = syms.map(s => `<option value="${s}">${s}</option>`).join('') || '<option value="">—</option>';
-      if (!_symbol || !syms.includes(_symbol)) _symbol = syms[0] || '';
-      sel.value = _symbol;
-      sel.onchange = () => { _symbol = sel.value; renderCharts(); };
-    }
-    function dataBySymbol(records, sym) { return records.filter(r => r.symbol === sym).sort((a, b) => a.ts - b.ts); }
-
-    function renderCharts() {
-      if (!_symbol) { destroyCharts(); return; }
-      const recs = dataBySymbol(_csvRecords, _symbol);
-      if (recs.length === 0) { destroyCharts(); return; }
-      const xyPrice = recs.map(r => ({ x: r.ts, y: r.price }));
-      const buys = recs.filter(r => r.side === 'buy').map(r => ({ x: r.ts, y: r.price }));
-      const sells = recs.filter(r => r.side === 'sell').map(r => ({ x: r.ts, y: r.price }));
-      const holds = recs.filter(r => r.side === 'hold').map(r => ({ x: r.ts, y: r.price }));
-      const rsi = recs.map(r => ({ x: r.ts, y: r.rsi14 ?? null }));
-      const adx = recs.map(r => ({ x: r.ts, y: r.adx14 ?? null }));
-      const priceCfg = {
-        type: 'line',
-        data: {
-          datasets: [
-            { label: `${_symbol} · Price (at decision)`, data: xyPrice, borderColor: C.line, borderWidth: 2, pointRadius: 0, tension: 0.25 },
-            { label: 'BUY', type: 'scatter', data: buys, pointRadius: 5, borderColor: C.accent, backgroundColor: C.accent, pointStyle: 'triangle', rotation: 0 },
-            { label: 'SELL', type: 'scatter', data: sells, pointRadius: 5, borderColor: C.danger, backgroundColor: C.danger, pointStyle: 'triangle', rotation: 180 },
-            { label: 'HOLD', type: 'scatter', data: holds, pointRadius: 4, borderColor: C.warn, backgroundColor: C.warn, pointStyle: 'circle' }
-          ]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: {
-            x: { type: 'time', time: { unit: 'hour' }, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
-            y: { ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } }
-          },
-          plugins: {
-            legend: { labels: { color: C.text, font: { size: 11 } } },
-            tooltip: {
-              callbacks: {
-                label: ctx => {
-                  const d = ctx.raw || {}; const side = ctx.dataset.label; const t = new Date(d.x).toLocaleString();
-                  return `${side || 'Price'} · ${t} · ${d.y}`;
-                }
-              }
+        @media (max-width: 968px) {
+            .table-container {
+                grid-template-columns: 1fr;
             }
-          }
+            
+            .table-section-small {
+                max-height: 350px;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            }
         }
-      };
-      const indiCfg = {
-        type: 'line',
-        data: {
-          datasets: [
-            { label: 'RSI(14)', data: rsi, borderColor: '#4fc3f7', borderWidth: 1.5, pointRadius: 1.5, yAxisID: 'y' },
-            { label: 'ADX(14)', data: adx, borderColor: '#f78fb3', borderWidth: 1.5, pointRadius: 1.5, yAxisID: 'y1' }
-          ]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: {
-            x: { type: 'time', time: { unit: 'hour' }, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
-            y: { position: 'left', min: 0, max: 100, ticks: { color: C.text, font: { size: 10 } }, grid: { color: C.grid } },
-            y1: { position: 'right', min: 0, max: 60, ticks: { color: C.text, font: { size: 10 } }, grid: { drawOnChartArea: false, color: C.grid } }
-          },
-          plugins: { legend: { labels: { color: C.text, font: { size: 11 } } } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 AI Trading Status - 实时监控</h1>
+            <div class="controls">
+                <select id="symbolSelect">
+                    <option value="all">所有币种</option>
+                    <option value="BTC-USDT">BTC-USDT</option>
+                    <option value="ETH-USDT">ETH-USDT</option>
+                    <option value="BNB-USDT">BNB-USDT</option>
+                    <option value="SOL-USDT">SOL-USDT</option>
+                    <option value="XRP-USDT">XRP-USDT</option>
+                    <option value="DOGE-USDT">DOGE-USDT</option>
+                </select>
+                <button onclick="refreshData()">🔄 刷新数据</button>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">账户总值</div>
+                <div class="stat-value" id="totalValue">$--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">未实现盈亏</div>
+                <div class="stat-value" id="unrealizedPnl">$--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">今日交易次数</div>
+                <div class="stat-value" id="tradeCount">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">平均持仓时间</div>
+                <div class="stat-value" id="avgHoldTime">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">做多比例</div>
+                <div class="stat-value" id="longRatio">--%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">平均信心度</div>
+                <div class="stat-value" id="avgConfidence">--%</div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <div class="chart-header">
+                <div class="chart-title" id="chartTitle">BTC-USDT - 价格走势 & 交易信号 (30分钟)</div>
+                <div class="time-selector">
+                    <button class="time-btn active" onclick="switchTimeframe('30m')">30分钟</button>
+                    <button class="time-btn" onclick="switchTimeframe('4h')">4小时</button>
+                </div>
+            </div>
+            <div id="priceChart"></div>
+        </div>
+
+        <div class="signal-stats">
+            <h3>📊 信号分布统计</h3>
+            <div id="signalChart"></div>
+        </div>
+
+        <div class="table-container">
+            <div class="table-section-small">
+                <h3>📡 最近交易信号 (最新50条)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>币种</th>
+                            <th>信号</th>
+                            <th>价格</th>
+                            <th>信心度</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signalsTableBody">
+                        <tr><td colspan="5" style="text-align: center; padding: 20px; color: #718096;">暂无数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="table-section-small">
+                <h3>💼 最近执行交易 (最新50条)</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>币种</th>
+                            <th>方向</th>
+                            <th>数量</th>
+                            <th>价格</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tradesTableBody">
+                        <tr><td colspan="5" style="text-align: center; padding: 20px; color: #718096;">暂无数据</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="last-update">最后更新: <span id="lastUpdate">--:--:--</span></div>
+    </div>
+
+    <script>
+        let priceChart = null;
+        let signalChart = null;
+        let currentSymbol = 'BTC-USDT';
+        let currentTimeframe = '30m';
+
+        // 初始化图表
+        function initCharts() {
+            priceChart = echarts.init(document.getElementById('priceChart'));
+            signalChart = echarts.init(document.getElementById('signalChart'));
+            
+            // 设置初始空配置
+            updatePriceChart([]);
+            updateSignalChart({});
         }
-      };
-      destroyCharts();
-      priceChart = new Chart(el('priceChart').getContext('2d'), priceCfg);
-      indiChart = new Chart(el('indiChart').getContext('2d'), indiCfg);
-    }
-    function destroyCharts() { try { priceChart && priceChart.destroy(); } catch { } try { indiChart && indiChart.destroy(); } catch { } priceChart = null; indiChart = null; }
 
-    async function loadCsvAndRender() {
-      const recs = await fetchDecisionCsv();
-      _csvRecords = recs;
-      if (!_csvRecords.length) { destroyCharts(); fillSymbolOptions([]); return; }
-      fillSymbolOptions(_csvRecords);
-      renderCharts();
-    }
+        // 更新价格图表
+        function updatePriceChart(data) {
+            const times = data.map(d => {
+                const date = new Date(d.timestamp);
+                const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                const day = date.getDate().toString().padStart(2, '0');
+                const hours = date.getHours().toString().padStart(2, '0');
+                const minutes = date.getMinutes().toString().padStart(2, '0');
+                return `${month}-${day} ${hours}:${minutes}`;
+            });
+            const prices = data.map(d => d.close);
+            const buySignals = data.filter(d => d.signal === 'entry').map(d => {
+                const date = new Date(d.timestamp);
+                const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                const day = date.getDate().toString().padStart(2, '0');
+                const hours = date.getHours().toString().padStart(2, '0');
+                const minutes = date.getMinutes().toString().padStart(2, '0');
+                return [`${month}-${day} ${hours}:${minutes}`, d.close];
+            });
+            const sellSignals = data.filter(d => d.signal === 'exit').map(d => {
+                const date = new Date(d.timestamp);
+                const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                const day = date.getDate().toString().padStart(2, '0');
+                const hours = date.getHours().toString().padStart(2, '0');
+                const minutes = date.getMinutes().toString().padStart(2, '0');
+                return [`${month}-${day} ${hours}:${minutes}`, d.close];
+            });
 
-    // ===== 首次加载与定时刷新 =====
-    (async () => {
-      await fetchStatus(true);
-      await fetchSignals();
-      await fetchTrades();
-      await loadCsvAndRender();
-      setInterval(fetchStatus, 3000);
-      setInterval(fetchSignals, 5000);
-      setInterval(fetchTrades, 5000);
-      setInterval(loadCsvAndRender, 15000); // 每15秒刷新一次CSV
-    })();
-  </script>
+            const option = {
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' }
+                },
+                legend: {
+                    data: ['收盘价', '买入信号', '卖出信号']
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    containLabel: true
+                },
+                xAxis: {
+                    type: 'category',
+                    boundaryGap: false,
+                    data: times,
+                    axisLabel: {
+                        rotate: 45,
+                        interval: Math.floor(times.length / 10) || 0
+                    }
+                },
+                yAxis: {
+                    type: 'value',
+                    scale: true
+                },
+                series: [
+                    {
+                        name: '收盘价',
+                        type: 'line',
+                        data: prices,
+                        smooth: true,
+                        lineStyle: { width: 2, color: '#667eea' },
+                        itemStyle: { color: '#667eea' },
+                        areaStyle: {
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{
+                                offset: 0,
+                                color: 'rgba(102, 126, 234, 0.3)'
+                            }, {
+                                offset: 1,
+                                color: 'rgba(102, 126, 234, 0.05)'
+                            }])
+                        }
+                    },
+                    {
+                        name: '买入信号',
+                        type: 'scatter',
+                        data: buySignals,
+                        symbolSize: 15,
+                        itemStyle: { color: '#48bb78' },
+                        z: 10
+                    },
+                    {
+                        name: '卖出信号',
+                        type: 'scatter',
+                        data: sellSignals,
+                        symbolSize: 15,
+                        itemStyle: { color: '#f56565' },
+                        z: 10
+                    }
+                ]
+            };
+
+            priceChart.setOption(option);
+        }
+
+        // 更新信号统计图表
+        function updateSignalChart(stats) {
+            const option = {
+                tooltip: {
+                    trigger: 'item'
+                },
+                legend: {
+                    bottom: '5%',
+                    left: 'center'
+                },
+                series: [
+                    {
+                        name: '信号分布',
+                        type: 'pie',
+                        radius: ['40%', '70%'],
+                        avoidLabelOverlap: false,
+                        itemStyle: {
+                            borderRadius: 10,
+                            borderColor: '#fff',
+                            borderWidth: 2
+                        },
+                        label: {
+                            show: true,
+                            formatter: '{b}: {c} ({d}%)'
+                        },
+                        data: [
+                            { value: stats.entry || 0, name: '买入信号', itemStyle: { color: '#48bb78' } },
+                            { value: stats.exit || 0, name: '卖出信号', itemStyle: { color: '#f56565' } },
+                            { value: stats.hold || 0, name: '持有信号', itemStyle: { color: '#a0aec0' } }
+                        ]
+                    }
+                ]
+            };
+
+            signalChart.setOption(option);
+        }
+
+        // 切换时间周期
+        function switchTimeframe(timeframe) {
+            currentTimeframe = timeframe;
+            
+            // 更新按钮状态
+            document.querySelectorAll('.time-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // 更新图表标题
+            const timeframeText = timeframe === '30m' ? '30分钟' : '4小时';
+            document.getElementById('chartTitle').textContent = 
+                `${currentSymbol} - 价格走势 & 交易信号 (${timeframeText})`;
+            
+            // 重新加载数据
+            loadData();
+        }
+
+        // 加载数据
+        async function loadData() {
+            try {
+                const params = new URLSearchParams({
+                    symbol: currentSymbol,
+                    timeframe: currentTimeframe
+                });
+                
+                const response = await fetch(`/api/status?${params}`);
+                const data = await response.json();
+                
+                // 更新统计数据
+                updateStats(data.stats);
+                
+                // 更新图表
+                updatePriceChart(data.klines || []);
+                updateSignalChart(data.signal_stats || {});
+                
+                // 更新表格
+                updateTables(data.signals || [], data.trades || []);
+                
+                // 更新最后更新时间
+                const now = new Date();
+                document.getElementById('lastUpdate').textContent = 
+                    now.toLocaleTimeString('zh-CN');
+                    
+            } catch (error) {
+                console.error('加载数据失败:', error);
+            }
+        }
+
+        // 更新统计数据
+        function updateStats(stats) {
+            if (!stats) return;
+            
+            document.getElementById('totalValue').textContent = 
+                stats.total_value ? `$${stats.total_value.toLocaleString()}` : '$--';
+            
+            const pnlElement = document.getElementById('unrealizedPnl');
+            if (stats.unrealized_pnl !== undefined) {
+                pnlElement.textContent = `$${stats.unrealized_pnl.toLocaleString()}`;
+                pnlElement.className = 'stat-value ' + (stats.unrealized_pnl >= 0 ? 'positive' : 'negative');
+            }
+            
+            document.getElementById('tradeCount').textContent = stats.trade_count || '--';
+            document.getElementById('avgHoldTime').textContent = stats.avg_hold_time || '--';
+            document.getElementById('longRatio').textContent = 
+                stats.long_ratio !== undefined ? `${stats.long_ratio}%` : '--%';
+            document.getElementById('avgConfidence').textContent = 
+                stats.avg_confidence !== undefined ? `${stats.avg_confidence}%` : '--%';
+        }
+
+        // 更新表格
+        function updateTables(signals, trades) {
+            // 更新信号表格
+            const signalsBody = document.getElementById('signalsTableBody');
+            if (signals.length === 0) {
+                signalsBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #718096;">暂无数据</td></tr>';
+            } else {
+                signalsBody.innerHTML = signals.map(s => `
+                    <tr>
+                        <td>${new Date(s.timestamp).toLocaleString('zh-CN')}</td>
+                        <td>${s.symbol}</td>
+                        <td><span class="signal-badge ${s.signal}">${s.signal}</span></td>
+                        <td>$${s.price.toFixed(2)}</td>
+                        <td>${s.confidence || '--'}</td>
+                    </tr>
+                `).join('');
+            }
+            
+            // 更新交易表格
+            const tradesBody = document.getElementById('tradesTableBody');
+            if (trades.length === 0) {
+                tradesBody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #718096;">暂无数据</td></tr>';
+            } else {
+                tradesBody.innerHTML = trades.map(t => `
+                    <tr>
+                        <td>${new Date(t.timestamp).toLocaleString('zh-CN')}</td>
+                        <td>${t.symbol}</td>
+                        <td><span class="direction-badge ${t.side}">${t.side}</span></td>
+                        <td>${t.quantity}</td>
+                        <td>$${t.price.toFixed(2)}</td>
+                    </tr>
+                `).join('');
+            }
+        }
+
+        // 刷新数据
+        function refreshData() {
+            loadData();
+        }
+
+        // 币种选择变化
+        document.getElementById('symbolSelect').addEventListener('change', (e) => {
+            currentSymbol = e.target.value === 'all' ? 'BTC-USDT' : e.target.value;
+            const timeframeText = currentTimeframe === '30m' ? '30分钟' : '4小时';
+            document.getElementById('chartTitle').textContent = 
+                `${currentSymbol} - 价格走势 & 交易信号 (${timeframeText})`;
+            loadData();
+        });
+
+        // 窗口大小变化时重新调整图表
+        window.addEventListener('resize', () => {
+            priceChart && priceChart.resize();
+            signalChart && signalChart.resize();
+        });
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            loadData();
+            // 每30秒自动刷新
+            setInterval(loadData, 30000);
+        });
+    </script>
 </body>
-
 </html>

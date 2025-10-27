@@ -1,4 +1,8 @@
 {
   "start_ts": 1761409661.295291,
-  "invocations": 44
+  "invocations": 55,
+  "ai_last_call": {
+    "ETH-USDT": 1761593288.05726
+  },
+  "ai_last_call_global_ts": 1761593288.05726
 }
