@@ -1,31 +1,31 @@
 {
-  "updated_at": "2025-10-28T19:02:41.043858+00:00",
+  "updated_at": "2025-10-28T20:38:42.563066+00:00",
   "engine": {
     "test_mode": false,
-    "invocations": 67
+    "invocations": 71
   },
   "account": {
-    "equity": 140631.53999999998
+    "equity": 137643.64999999997
   },
   "decision": {
-    "symbol": "XRP-USDT",
+    "symbol": "BTC-USDT",
     "side": "buy",
-    "size": 15769.0,
+    "size": 0.3669,
     "confidence": 0.65,
-    "reason": "MACD金叉+ADX走强"
+    "reason": "RSI超卖反弹，MACD上穿信号"
   },
   "risk": {
     "consecutive_losses": 0,
     "cooldown": {
       "mode": "dynamic",
-      "cooldown_seconds": 542,
+      "cooldown_seconds": 551,
       "remaining_seconds": 0,
       "active": false
     }
   },
   "market": {
-    "symbol": "XRP-USDT",
-    "volatility_24h_pct": 0.032294
+    "symbol": "BTC-USDT",
+    "volatility_24h_pct": 0.033477
   },
   "gray_unlock": {
     "suggested": false,
