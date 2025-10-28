@@ -127,7 +127,7 @@ def _build_messages_cn(market: dict, balance: dict, constraints: dict, recent_tr
         "      \"leverage\":<float>,\n"                           
         "      \"max_slippage_bps\":<int>,\n"
         "      \"risk\":{\"stop_loss_pct\":<float>,\"take_profit_pct\":<float>},\n"
-        "      \"confidence\":<0..1.5 的小数>,\n"                  
+        "      \"confidence\": <float, 0.0 至 1.5 之间的小数，不能为空或 null>, \n"                
         "      \"rationale\":\"≤30字中文理由\"\n"
         "   },\"ts\":\"ISO-8601\"}\n"
         "3) 仅输出一个 symbol；所有数值必须是裸数（不带单位/百分号/区间）。\n"

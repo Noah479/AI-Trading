@@ -354,7 +354,7 @@ def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs
     os.makedirs(log_dir, exist_ok=True)
     file_path = os.path.join(log_dir, "ai_decision_log.csv")
     headers = [
-        "ts","symbol","side","confidence","rationale",
+        "ts","symbol","side","confidence","rationale","leverage",
         "stop_loss_pct","take_profit_pct","adx14","rsi14","macd","price"
     ]
 
@@ -459,42 +459,6 @@ def _dynamic_ai_interval_secs(row: dict, ctx4h: dict=None, in_pos: bool=False) -
     sec = base * adx_factor * vol_factor * rsi_factor * tf_factor * pos_factor * jitter
     return int(max(DYN_MIN_SEC, min(DYN_MAX_SEC, sec)))
 
-
-def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs"):
-    os.makedirs(log_dir, exist_ok=True)
-    file_path = os.path.join(log_dir, "ai_decision_log.csv")
-    headers = [
-        "ts","symbol","side","confidence","rationale","leverage",
-        "stop_loss_pct","take_profit_pct","adx14","rsi14","macd","price"
-    ]
-
-    d = decision.get("decision", {})
-    sym = d.get("symbol")
-    row = market.get(sym, {})
-
-    record = {
-        "ts": decision.get("ts"),
-        "symbol": sym,
-        "side": d.get("side"),
-        "confidence": d.get("confidence"),
-        "leverage": d.get("leverage"),
-        "rationale": d.get("rationale"),
-        "stop_loss_pct": (d.get("risk") or {}).get("stop_loss_pct"),
-        "take_profit_pct": (d.get("risk") or {}).get("take_profit_pct"),
-        "adx14": row.get("adx14"),
-        "rsi14": row.get("rsi14"),
-        "macd": row.get("macd"),
-        "price": row.get("price")
-    }
-
-    write_header = not os.path.exists(file_path)
-    with open(file_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(record)
-    print(f"🧾 已写入日志: {file_path}")
-
 def _decisions_from_ai(market: dict, balance: dict) -> dict:
     """DeepSeek 决策 → TRADING_DECISIONS JSON"""
     progress.step("调用 AI 决策引擎", "DeepSeek 分析市场数据...")
@@ -523,12 +487,6 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
     progress.substep(f"📈 自动分配杠杆: {d['leverage']:.2f}x（置信度 {conf:.2f}）")
 
     ai_time = time.time() - start_ai
-
-        # ✅ 修改判断逻辑
-    if meta and meta.get('error') and meta['error'] is not None:
-        progress.warning(f"DeepSeek 调用失败：{meta['error']}（已回退 HOLD）")
-    else:
-        progress.success(f"AI 决策完成，耗时 {ai_time:.2f}s")
 
     # ✅ 详细检查返回值
     print(f"\n{'='*70}")
@@ -574,7 +532,8 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
                 "signal": "hold",
                 "quantity": _pos_qty(balance, sym),
                 "leverage": (balance.get("positions") or {}).get(sym, {}).get("leverage", None),
-                "confidence": None
+                "confidence": 0.5,  # 默认中性信心度
+                "ai_reason": "等待AI信号"  # 默认理由
             }
         }
 
@@ -612,8 +571,12 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
                     "ai_reason": ai_reason   # ★ 新增：把模型理由放进信号里，后续用于前端
                 })
             else:
-                # 未通过风控
-                td[coin]["trade_signal_args"]["note"] = f"risk_blocked: {reason}"
+                # 未通过风控：也要把 AI 的置信度/理由写入，避免前端为 null
+                td[coin]["trade_signal_args"].update({
+                    "confidence": d.get("confidence"),
+                    "ai_reason": ai_reason,                      # 建议统一这个字段名
+                    "note": f"risk_blocked: {reason}"
+                })
 
                 # TEST_MODE：强制打单
                 if TEST_MODE:
@@ -723,24 +686,29 @@ if __name__ == "__main__":
             market = fetch_market()
             balance = fetch_balance()
 
+            # === 轻量信号检测 ===
             sym, side, score = compute_local_signal(market)
             sig = f"{sym}:{side}:{round(score,2)}"
             now = time.time()
 
-            # === 动态计算下次触发间隔 ===
-            adx = market.get(sym, {}).get("adx14", 20)
-            rsi = market.get(sym, {}).get("rsi14", 50)
-            # 趋势强 or RSI 极端 → 缩短；震荡 → 拉长
-            factor = 0.7 if (adx > 30 or rsi > 70 or rsi < 30) else (1.3 if adx < 20 else 1.0)
-            jitter = 1.0 + (random.random() - 0.5) * 0.3
-            dyn_interval = max(MIN_AI_INTERVAL_SEC, min(MAX_AI_INTERVAL_SEC, BASE_INTERVAL * factor * jitter))
+            # === 动态计算下次触发间隔（使用 30m + 4h 自适应函数） ===
+            ctx4h = (market.get(sym, {}).get("tf") or {}).get("4h")
+            dyn_interval = _dynamic_ai_interval_secs(
+                market.get(sym, {}), ctx4h, in_pos=False
+            )
 
+            progress.substep(
+                f"[事件检测] signal={sig}, 下次AI间隔≈{int(dyn_interval)}秒 "
+                f"(≈{dyn_interval/60:.1f}分钟)"
+            )
+
+            # === 判断是否触发 AI 决策 ===
             need_call = (sig != last_sig) or ((now - last_call_ts) > dyn_interval)
             recently_called = (now - last_call_ts) < (dyn_interval * 0.5)
 
             progress.substep(
-                f"[事件检测] signal={sig}, dyn_interval={int(dyn_interval)}s, "
-                f"last_call={int(now - last_call_ts)}s ago, need_call={need_call}"
+                f"上次触发距今 {int(now - last_call_ts)} 秒, "
+                f"need_call={need_call}, recently_called={recently_called}"
             )
 
             if need_call and not recently_called:
@@ -754,4 +722,5 @@ if __name__ == "__main__":
         except Exception as e:
             progress.error(f"主循环异常: {e}")
 
+        # 每分钟检查一次触发条件
         time.sleep(60)

@@ -1,31 +1,31 @@
 {
-  "updated_at": "2025-10-27T20:45:59.479301+00:00",
+  "updated_at": "2025-10-28T19:02:41.043858+00:00",
   "engine": {
     "test_mode": false,
-    "invocations": 55
+    "invocations": 67
   },
   "account": {
-    "equity": 140489.16999999998
+    "equity": 140631.53999999998
   },
   "decision": {
-    "symbol": null,
-    "side": null,
-    "size": null,
-    "confidence": null,
-    "reason": null
+    "symbol": "XRP-USDT",
+    "side": "buy",
+    "size": 15769.0,
+    "confidence": 0.65,
+    "reason": "MACD金叉+ADX走强"
   },
   "risk": {
     "consecutive_losses": 0,
     "cooldown": {
       "mode": "dynamic",
-      "cooldown_seconds": 528,
+      "cooldown_seconds": 542,
       "remaining_seconds": 0,
       "active": false
     }
   },
   "market": {
-    "symbol": "BTC-USDT",
-    "volatility_24h_pct": 0.030529
+    "symbol": "XRP-USDT",
+    "volatility_24h_pct": 0.032294
   },
   "gray_unlock": {
     "suggested": false,

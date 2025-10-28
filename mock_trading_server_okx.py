@@ -4,6 +4,9 @@ from config import OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE, OKX_BASE_URL
 import json, pathlib, os
 from flask import send_from_directory
 
+import logging
+from logging.handlers import RotatingFileHandler
+
 app = Flask(__name__)
 
 # 币种列表
@@ -15,6 +18,27 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 SIGNAL_LOG = LOG_DIR / "recent_signals.jsonl"
 TRADE_LOG  = LOG_DIR / "recent_trades.jsonl"
+
+# === Flask + Werkzeug 日志写入文件 ===
+log_path = LOG_DIR / "flask_server.log"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+handler = RotatingFileHandler(
+    log_path, maxBytes=5*1024*1024, backupCount=5, encoding="utf-8"
+)
+formatter = logging.Formatter(
+    '[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+)
+handler.setFormatter(formatter)
+
+# 1️⃣ 把 handler 添加到 Flask 自己的 logger
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.INFO)
+
+# 2️⃣ 同时添加到 Werkzeug 的访问日志
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.addHandler(handler)
+werkzeug_logger.setLevel(logging.INFO)
 
 # 全局行情缓存
 market_cache = {}
@@ -143,10 +167,6 @@ def _tail_jsonl(path: pathlib.Path, limit: int):
     # 倒序（最新在前）
     return list(reversed(arr))
 
-@app.get("/status")
-def serve_status_page():
-    # 直接从当前文件所在目录输出 ai_status.html
-    return send_from_directory(str(BASE_DIR), "ai_status.html")
 
 @app.get("/logs/<path:filename>")
 def serve_logs(filename):
@@ -163,21 +183,32 @@ def recent_trades():
     limit = int(request.args.get("limit", 50))
     return jsonify({"items": _tail_jsonl(TRADE_LOG, limit)})
 
-# === AI 状态 JSON ===
-@app.get("/ai/status")
-def ai_status_json():
+
+# === AI 状态接口（统一标准版） ===
+@app.get("/leaderboard")
+def leaderboard_page():
+    return render_template("leaderboard.html")
+
+@app.get("/api/status")
+def api_status():
+    """
+    返回 AI 状态 JSON，用于前端轮询展示
+    """
     try:
         path = LOG_DIR / "ai_status.json"
         if not path.exists():
-            return jsonify({"status":"empty","message":"ai_status.json not found"}), 200
+            return jsonify({
+                "status": "empty",
+                "message": "ai_status.json not found"
+            }), 200
+
         return jsonify(json.loads(path.read_text(encoding="utf-8")))
     except Exception as e:
-        return jsonify({"status":"error","error":str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
-# === AI 状态页面 ===
-@app.get("/ai")
-def ai_status_page():
-    return render_template("ai_status.html")
 
 @app.get("/market")
 def market():
@@ -205,12 +236,6 @@ def market():
 def dashboard():
     return render_template("dashboard.html")
 
-# @app.route("/balance", methods=["GET"])
-# def get_balance():
-#     # path = "/api/v5/account/balance"
-#     path = "/api/v5/account/positions"
-#     r = requests.get(OKX_BASE_URL + path, headers=okx_headers("GET", path))
-#     return jsonify(r.json())
 
 @app.route('/balance', methods=['GET'])
 def get_balance():
@@ -255,17 +280,17 @@ def get_balance():
     
 @app.route("/order", methods=["POST"])
 def place_order():
-    """
-    模拟下单接口（不访问OKX服务器）
-    仅用于测试 AI → 风控 → 下单 → 日志 流程是否正常。
-    """
     data = request.get_json()
     symbol = data.get("symbol", "BTC-USDT")
     side = data.get("side", "buy").lower()
     size = str(data.get("size", 0.001))
     order_type = data.get("order_type", "market")
 
-    # 模拟回执
+    # 模拟延迟与随机滑点
+    import random, time
+    time.sleep(random.uniform(0.2, 1.0))  # 模拟网络延迟
+    mock_price = random.uniform(0.99, 1.01)  # ±1% 随机滑点
+
     mock_response = {
         "code": "0",
         "msg": "success",
@@ -274,38 +299,14 @@ def place_order():
             "instId": symbol,
             "side": side,
             "sz": size,
+            "price": mock_price,
             "ordType": order_type
         }]
     }
 
-    # 控制台日志
-    print(f"[MOCK ORDER] {side.upper()} {size} {symbol}")
+    print(f"[MOCK ORDER] {side.upper()} {size} {symbol} @ {mock_price:.2%}")
     return jsonify(mock_response)
 
-# @app.route("/order", methods=["POST"])
-# def place_order():
-#     data = request.get_json()
-#     symbol = data.get("symbol")
-#     side = data.get("side", "buy").lower()
-#     sz = str(data.get("size", 0.001))
-#     ord_type = "market"
-
-#     path = "/api/v5/trade/order"
-#     body = {
-#         "instId": symbol,
-#         "tdMode": "cross",
-#         "side": side,
-#         "ordType": ord_type,
-#         "sz": sz
-#     }
-#     body_json = json.dumps(body)
-#     headers = okx_headers("POST", path, body_json)
-
-#     # ✅ 就在这一行上面插入 ↓↓↓
-#     print("[DEBUG] Posting to", OKX_BASE_URL + path)
-
-#     r = requests.post(OKX_BASE_URL + path, headers=headers, data=body_json)
-#     return jsonify(r.json())
 
 # ==============================
 # /verify 接口

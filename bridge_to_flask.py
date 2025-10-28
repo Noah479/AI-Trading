@@ -91,6 +91,7 @@ def _log_signal(meta: Dict[str, Any], coin: str, args: Dict[str, Any], extra: Di
         "account_value": meta.get("account_value"),
         "available_cash": meta.get("available_cash"),
         "coin": coin,
+        "symbol": _symbol_of(coin),         # ✅ 补写 symbol，前端更清晰
         **args,
         **extra,
     }
