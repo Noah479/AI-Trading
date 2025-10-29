@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 import requests, time, base64, hmac, hashlib, threading, json
 from config import OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE, OKX_BASE_URL
-import json, pathlib, os
+import json, pathlib, os, random
 from flask import send_from_directory
 
 import logging
@@ -53,8 +53,8 @@ CACHE_TTL_SNAPSHOT = 2     # 快照缓存2秒
 
 CACHE_TTL_CANDLES  = 600   # K线缓存10分钟（OKX防抖）
 CANDLE_LIMIT = 240         # 至少200根，给余量
-# 多周期清单（本次我们要 30m + 4h）
-BARS = ["30m", "4h"]
+
+BARS = ["3m", "30m", "4h"]  # ✅ 增加 3m 短周期
 
 def okx_get(path, params=None, timeout=5):
     r = _session.get(OKX_BASE_URL + path, params=params, timeout=timeout)
@@ -110,24 +110,23 @@ def okx_sign(timestamp, method, request_path, body=""):
     return base64.b64encode(mac.digest()).decode()
 
 def okx_headers(method, request_path, body=""):
-    """自动同步 OKX 服务器时间"""
-    try:
-        r = requests.get(OKX_BASE_URL + "/api/v5/public/time")
-        server_time = str(float(r.json()["data"][0]["ts"]) / 1000)
-    except Exception:
-        server_time = str(time.time())
-
-    sign = okx_sign(server_time, method, request_path, body)
+    """生成 OKX 请求头（使用本地时间）"""
+    from datetime import datetime, timezone
+    
+    # 直接用本地 UTC 时间
+    dt = datetime.now(timezone.utc)
+    timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
+    sign = okx_sign(timestamp, method, request_path, body)
+    
     return {
         "OK-ACCESS-KEY": OKX_API_KEY,
         "OK-ACCESS-SIGN": sign,
-        "OK-ACCESS-TIMESTAMP": server_time,
+        "OK-ACCESS-TIMESTAMP": timestamp,
         "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
         "Content-Type": "application/json",
         "x-simulated-trading": "1"
     }
-
-
 
 # ==============================
 # 异步行情更新线程
@@ -168,6 +167,7 @@ def _tail_jsonl(path: pathlib.Path, limit: int):
     return list(reversed(arr))
 
 
+
 @app.get("/logs/<path:filename>")
 def serve_logs(filename):
     # 直接从绝对 logs 目录输出任何日志文件（CSV/JSONL等）
@@ -176,7 +176,12 @@ def serve_logs(filename):
 @app.get("/recent/signals")
 def recent_signals():
     limit = int(request.args.get("limit", 50))
-    return jsonify({"items": _tail_jsonl(SIGNAL_LOG, limit)})
+    items = _tail_jsonl(SIGNAL_LOG, limit)
+
+    # ✅ 新增：按时间字段排序（最旧→最新）
+    items.sort(key=lambda s: s.get("ts") or s.get("timestamp") or s.get("time") or s.get("created_at"))
+
+    return jsonify({"items": items})
 
 @app.get("/recent/trades")
 def recent_trades():
@@ -188,6 +193,8 @@ def recent_trades():
 @app.get("/leaderboard")
 def leaderboard_page():
     return render_template("leaderboard.html")
+
+
 
 @app.get("/api/status")
 def api_status():
@@ -212,30 +219,75 @@ def api_status():
 
 @app.get("/market")
 def market():
+    """
+    模拟行情接口（带微观结构指标），
+    可自动切换为 OKX 实盘行情（6个币），
+    若实盘请求失败则回退为本地缓存。
+    """
     out = {"data": {}}
-    for sym in SYMBOLS:
-        snap = fetch_snapshot_cached(sym)
-        # 逐bar取回缓存
-        cds_30m = fetch_candles_cached(sym, "30m")
-        cds_4h  = fetch_candles_cached(sym, "4h")
 
+    for sym in SYMBOLS:
+        # === 尝试获取 OKX 实盘行情 ===
+        try:
+            r = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={sym}", timeout=5)
+            js = r.json()
+            if js.get("code") == "0" and js.get("data"):
+                snap = js["data"][0]  # ✅ 实盘行情数据
+            else:
+                raise Exception("empty")
+        except Exception:
+            # ⚙️ 回退到本地缓存模式
+            snap = fetch_snapshot_cached(sym)
+
+        # === 基础行情 ===
+        last = float(snap.get("last") or 0)
+        high24h = float(snap.get("high24h") or 0)
+        low24h = float(snap.get("low24h") or 0)
+
+        # ✅ 获取 3 个时间框架的 K线
+        cds_3m = fetch_candles_cached(sym, "3m", limit=240)   # 3m × 240 = 12 小时
+        cds_30m = fetch_candles_cached(sym, "30m", limit=240) # 30m × 240 = 5 天
+        cds_4h = fetch_candles_cached(sym, "4h", limit=240)   # 4h × 240 = 40 天
+
+        # === ask / bid ===
+        ask = float(snap.get("askPx") or snap.get("ask") or 0 or last)
+        bid = float(snap.get("bidPx") or snap.get("bid") or 0 or last)
+        if not ask or not bid:
+            # 无盘口信息则生成随机价差
+            if last > 0:
+                spread_ratio = random.uniform(0.0003, 0.0008)
+                spread = last * spread_ratio
+                bid = last - spread / 2
+                ask = last + spread / 2
+            else:
+                bid = ask = last
+        spread_bps = abs(ask - bid) / last * 1e4 if last else 0.0
+
+        # === 写入结果 ===
         out["data"][sym] = {
-            "price":  snap["last"],
-            "last":   snap["last"],
-            "high24h": snap["high24h"],
-            "low24h":  snap["low24h"],
-            # ★ 多时间尺度：返回映射而不是单一列表
+            "price": last,
+            "last": last,
+            "high24h": high24h,
+            "low24h": low24h,
             "candles": {
-                "30m": cds_30m,   # [[o,h,l,c,v], ...] 旧->新
-                "4h":  cds_4h
-            }
+                
+                "30m": cds_30m,
+                "4h": cds_4h
+            },
+            "bid": bid,
+            "ask": ask,
+            "spread_bps": spread_bps,
+            "open_interest": random.uniform(50_000_000, 80_000_000),
+            "funding_rate": random.uniform(-0.0003, 0.0003),
+            "volume_24h": float(snap.get("volCcyQuote") or 0.0),
         }
+
     return jsonify(out)
+
 
 @app.route("/dashboard")
 def dashboard():
     return render_template("dashboard.html")
-
 
 @app.route('/balance', methods=['GET'])
 def get_balance():
@@ -243,26 +295,46 @@ def get_balance():
     获取账户余额并合并未实现盈亏（Unrealized PnL）
     """
     try:
-        timestamp = str(time.time())
+        # ✅ 1. 获取账户余额
         headers = okx_headers("GET", "/api/v5/account/balance")
-        balance_resp = requests.get(OKX_BASE_URL + "/api/v5/account/balance", headers=headers).json()
+        balance_resp = requests.get(
+            OKX_BASE_URL + "/api/v5/account/balance", 
+            headers=headers,
+            timeout=5
+        ).json()
 
+        # ✅ 2. 检查 API 响应是否成功
+        if balance_resp.get("code") != "0" or not balance_resp.get("data"):
+            app.logger.error(f"❌ Balance API failed: {balance_resp}")
+            return jsonify({
+                "error": "OKX API error",
+                "code": balance_resp.get("code", "unknown"),
+                "msg": balance_resp.get("msg", "No data returned")
+            }), 500
+
+        # ✅ 3. 获取持仓信息
         headers2 = okx_headers("GET", "/api/v5/account/positions")
-        pos_resp = requests.get(OKX_BASE_URL + "/api/v5/account/positions", headers=headers2).json()
+        pos_resp = requests.get(
+            OKX_BASE_URL + "/api/v5/account/positions", 
+            headers=headers2,
+            timeout=5
+        ).json()
 
+        # ✅ 4. 安全提取数据
         total_eq = float(balance_resp["data"][0].get("totalEq", 0))
         unrealized = 0.0
 
         # 累加所有未实现盈亏
-        for p in pos_resp.get("data", []):
-            try:
-                unrealized += float(p.get("upl", 0))
-            except:
-                pass
+        if pos_resp.get("code") == "0" and pos_resp.get("data"):
+            for p in pos_resp["data"]:
+                try:
+                    unrealized += float(p.get("upl", 0))
+                except (ValueError, TypeError):
+                    pass
 
         combined_total = total_eq + unrealized
 
-        # 在原始响应中加入新的字段
+        # ✅ 5. 返回统一格式
         result = {
             "code": "0",
             "msg": "success",
@@ -271,8 +343,19 @@ def get_balance():
             "totalEq_incl_unrealized": combined_total,
             "details": balance_resp["data"][0].get("details", []),
         }
+        
         return jsonify(result)
+
+    except KeyError as e:
+        app.logger.error(f"❌ KeyError in balance: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": "Missing data field in OKX response",
+            "detail": str(e)
+        }), 500
     except Exception as e:
+        app.logger.error(f"❌ Balance request failed: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -304,7 +387,6 @@ def place_order():
         }]
     }
 
-    print(f"[MOCK ORDER] {side.upper()} {size} {symbol} @ {mock_price:.2%}")
     return jsonify(mock_response)
 
 

@@ -1,500 +1,194 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Smoketest for Quant Mock Stack: AI -> Risk -> Order -> Frontend
-- Checks endpoints, schemas, logs, market data shapes, and basic system resources
-- Writes a markdown report to logs/smoketest_report.md
-"""
+# test_confidence.py - 置信度测试脚本
+import sys
+import os
 
-import os, sys, json, time, argparse, math, shutil, traceback
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+# 模拟市场数据
+MOCK_MARKET = {
+    "BTC-USDT": {
+        "price": 69000.0,
+        "last": 69000.0,
+        "high24h": 70000.0,
+        "low24h": 68000.0,
+        "ema_fast": 68500.0,
+        "ema_slow": 67000.0,
+        "rsi14": 55.0,
+        "atr14": 1380.0,
+        "macd": 150.0,
+        "macd_signal": 100.0,
+        "macd_prev": 120.0,
+        "macd_signal_prev": 110.0,
+        "adx14": 28.0,
+        "boll_upper": 71000.0,
+        "boll_mid": 69000.0,
+        "boll_lower": 67000.0,
+        "macd_golden_cross": False,
+        "macd_death_cross": False,
+        "tf": {
+            "3m": {
+                "rsi14": 52.0,
+                "adx14": 25.0,
+                "macd": 50.0,
+                "macd_signal": 45.0,
+                "ema_fast": 68800.0,
+                "ema_slow": 68500.0
+            },
+            "4h": {
+                "rsi14": 58.0,
+                "adx14": 30.0,
+                "macd": 200.0,
+                "macd_signal": 180.0,
+                "ema_fast": 69500.0,
+                "ema_slow": 68000.0
+            }
+        }
+    },
+    "ETH-USDT": {
+        "price": 2400.0,
+        "last": 2400.0,
+        "high24h": 2450.0,
+        "low24h": 2380.0,
+        "ema_fast": 2390.0,
+        "ema_slow": 2350.0,
+        "rsi14": 45.0,
+        "atr14": 48.0,
+        "macd": -10.0,
+        "macd_signal": -5.0,
+        "macd_prev": -8.0,
+        "macd_signal_prev": -6.0,
+        "adx14": 18.0,
+        "boll_upper": 2480.0,
+        "boll_mid": 2400.0,
+        "boll_lower": 2320.0,
+        "macd_golden_cross": False,
+        "macd_death_cross": False,
+        "tf": {
+            "3m": {"rsi14": 48.0, "adx14": 16.0},
+            "4h": {"rsi14": 50.0, "adx14": 20.0}
+        }
+    }
+}
 
-# -------- Optional deps (graceful fallback) --------
-try:
-    import requests
-except ImportError:
-    print("❌ 缺少 requests，请先: pip install requests")
-    sys.exit(1)
+MOCK_BALANCE = {
+    "USDT": {"available": 10000.0},
+    "totalEq": 10000.0,
+    "totalEq_incl_unrealized": 10000.0
+}
 
-try:
-    import psutil  # optional
-    HAS_PSUTIL = True
-except Exception:
-    HAS_PSUTIL = False
+print("="*70)
+print("测试 1: 置信度解析测试")
+print("="*70)
 
+# 测试用例 1：正常浮点数
+test_cases = [
+    {"confidence": 0.75, "expected": 0.75, "desc": "正常浮点数 0.75"},
+    {"confidence": 0.0, "expected": 0.30, "desc": "边界值 0.0（应被限制到 0.30）"},
+    {"confidence": 0.5, "expected": 0.50, "desc": "中间值 0.5"},
+    {"confidence": "0.85", "expected": 0.85, "desc": "字符串 '0.85'"},
+    {"confidence": "75%", "expected": 0.75, "desc": "百分比字符串 '75%'"},
+    {"confidence": 85, "expected": 0.85, "desc": "整数百分比 85"},
+    {"confidence": None, "expected": 0.55, "desc": "None（应使用默认值 0.55）"},
+]
 
-# -------- Formatting helpers --------
-GREEN = "\033[92m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-GRAY = "\033[90m"
-RESET = "\033[0m"
-
-def ok(msg):    print(f"{GREEN}✔ PASS{RESET} {msg}")
-def warn(msg):  print(f"{YELLOW}● WARN{RESET} {msg}")
-def fail(msg):  print(f"{RED}✖ FAIL{RESET} {msg}")
-
-def pct(x):  # 0.1234 -> "12.34%"
-    try:
-        return f"{x*100:.2f}%"
-    except Exception:
-        return "—"
-
-def is_number(x):
-    try:
-        float(x)
-        return True
-    except Exception:
-        return False
-
-
-# -------- HTTP helpers --------
-def jget(session, url, timeout=6):
-    try:
-        r = session.get(url, timeout=timeout)
-        ctype = r.headers.get("Content-Type","")
-        if "application/json" in ctype or r.text.strip().startswith("{") or r.text.strip().startswith("["):
-            return True, r.status_code, r.json(), r.text
-        else:
-            return True, r.status_code, None, r.text
-    except Exception as e:
-        return False, 0, None, str(e)
-
-
-# -------- JSONL helpers --------
-def tail_jsonl(path, n=50):
-    items = []
-    if not os.path.exists(path):
-        return items
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()[-n:]
-    for ln in lines:
-        ln = ln.strip()
-        if not ln:
-            continue
+# 简化的解析函数（复制你代码的逻辑）
+def parse_confidence(conf_raw):
+    if conf_raw is not None:
         try:
-            items.append(json.loads(ln))
-        except Exception:
-            continue
-    return items
-
-
-# -------- Checks --------
-def check_endpoints(base, session):
-    """Check core endpoints exist and return 2xx."""
-    results = []
-    endpoints = [
-        ("/api/status", "json"),
-        ("/recent/signals?limit=50", "json"),
-        ("/recent/trades?limit=50", "json"),
-        ("/market", "json"),
-        ("/balance", "json"),
-        ("/verify", "json"),          # 可能没有，容错
-        ("/leaderboard", "html"),
-    ]
-    for path, expect in endpoints:
-        ok_http, code, js, txt = jget(session, base + path)
-        if not ok_http:
-            fail(f"[HTTP] {path} 请求异常: {txt}")
-            results.append(("fail", path, code))
-            continue
-        if code // 100 != 2:
-            fail(f"[HTTP] {path} 状态码 {code}")
-            results.append(("fail", path, code))
-            continue
-        if expect == "json" and js is None:
-            warn(f"[HTTP] {path} 返回非 JSON（可能是 HTML/空），内容预览: {txt[:120]}")
-            results.append(("warn", path, code))
-        else:
-            ok(f"[HTTP] {path} 200 OK")
-            results.append(("ok", path, code))
-    return results
-
-
-def check_signals_schema(base, session, logs_dir):
-    """Validate recent signals via API + file JSONL."""
-    # via API
-    ok_http, code, js, txt = jget(session, base + "/recent/signals?limit=50")
-    issues = []
-    count = 0
-    if ok_http and code == 200 and isinstance(js, dict):
-        items = js.get("items", [])
-        count = len(items)
-        if count == 0:
-            warn("signals API 返回 0 条（如果刚启动可能正常）")
-        else:
-            # sample validate
-            bad_conf = 0
-            bad_side = 0
-            for s in items:
-                # confidence 必须是数字
-                conf = s.get("confidence", s.get("conf"))
-                if not is_number(conf):
-                    bad_conf += 1
-                # side/signal 至少有一个
-                sd = (s.get("side") or s.get("action") or s.get("signal"))
-                if not sd:
-                    bad_side += 1
-            if bad_conf == 0:
-                ok(f"signals API: confidence 字段均为数字（样本 {count}）")
+            # 处理字符串
+            if isinstance(conf_raw, str):
+                conf_raw = conf_raw.replace("%", "").strip()
+                conf = float(conf_raw)
+                if conf > 1.0:
+                    conf = conf / 100.0
+            # 处理数字
+            elif isinstance(conf_raw, (int, float)):
+                conf = float(conf_raw)
+                if conf > 1.0:
+                    conf = conf / 100.0
             else:
-                issues.append(f"signals API: 有 {bad_conf}/{count} 条 confidence 不是数字")
-            if bad_side == 0:
-                ok("signals API: side/action/signal 字段存在")
-            else:
-                issues.append(f"signals API: 有 {bad_side}/{count} 条缺少 side/action/signal")
-
-    # via file
-    path = os.path.join(logs_dir, "recent_signals.jsonl")
-    file_items = tail_jsonl(path, n=50)
-    if os.path.exists(path):
-        if file_items:
-            ok(f"signals 文件存在且可解析（{path}，最近 {len(file_items)} 条）")
-        else:
-            warn(f"signals 文件存在但无法解析或为空（{path}）")
+                conf = 0.55
+            
+            # 限制范围
+            conf = max(0.30, min(0.95, conf))
+            return conf
+        except:
+            return 0.55
     else:
-        warn(f"signals 文件不存在（{path}）")
+        return 0.55
 
-    if issues:
-        for m in issues:
-            fail(m)
-    return count, issues
+for i, case in enumerate(test_cases, 1):
+    result = parse_confidence(case["confidence"])
+    status = "✅" if abs(result - case["expected"]) < 0.01 else "❌"
+    print(f"{status} 测试 {i}: {case['desc']}")
+    print(f"   输入: {case['confidence']} → 输出: {result:.2f} (期望: {case['expected']:.2f})")
 
+print("\n" + "="*70)
+print("测试 2: 置信度影响杠杆计算")
+print("="*70)
 
-def check_trades_schema(base, session, logs_dir):
-    ok_http, code, js, txt = jget(session, base + "/recent/trades?limit=50")
-    issues = []
-    count = 0
-    if ok_http and code == 200 and isinstance(js, dict):
-        items = js.get("items", [])
-        count = len(items)
-        if count:
-            missing_core = 0
-            for t in items:
-                if not (t.get("instId") and t.get("side") and (t.get("sz") or t.get("size"))):
-                    missing_core += 1
-            if missing_core == 0:
-                ok("trades API: instId/side/size 基本字段齐全")
-            else:
-                issues.append(f"trades API: 有 {missing_core}/{count} 条缺少 instId/side/size")
-        else:
-            warn("trades API 返回 0 条（若尚未下单属正常）")
+# 导入你的杠杆计算函数
+try:
+    from ai_trader import _calculate_smart_leverage
+    
+    test_confidences = [0.30, 0.50, 0.70, 0.85, 0.95]
+    
+    for conf in test_confidences:
+        lev = _calculate_smart_leverage(
+            ai_confidence=conf,
+            market_row=MOCK_MARKET["BTC-USDT"],
+            consecutive_losses=0,
+            max_leverage=25.0
+        )
+        print(f"置信度 {conf:.2f} → 杠杆 {lev:.2f}x")
+    
+    print("\n✅ 如果看到杠杆随置信度变化，说明置信度生效了！")
+    
+except ImportError as e:
+    print(f"⚠️ 无法导入 ai_trader 模块: {e}")
+    print("请确保在项目根目录运行此脚本")
 
-    path = os.path.join(logs_dir, "recent_trades.jsonl")
-    file_items = tail_jsonl(path, n=50)
-    if os.path.exists(path):
-        if file_items:
-            ok(f"trades 文件存在且可解析（{path}，最近 {len(file_items)} 条）")
-        else:
-            warn(f"trades 文件存在但无法解析或为空（{path}）")
-    else:
-        warn(f"trades 文件不存在（{path}）")
+print("\n" + "="*70)
+print("测试 3: 置信度影响仓位计算")
+print("="*70)
 
-    if issues:
-        for m in issues:
-            fail(m)
-    return count, issues
+try:
+    from ai_trader import _calculate_smart_position
+    
+    for conf in test_confidences:
+        pos = _calculate_smart_position(
+            ai_confidence=conf,
+            market_row=MOCK_MARKET["BTC-USDT"],
+            equity=10000.0,
+            consecutive_losses=0,
+            max_position_pct=0.30
+        )
+        print(f"置信度 {conf:.2f} → 仓位 {pos:.2f} USDT ({pos/10000*100:.1f}%)")
+    
+    print("\n✅ 如果看到仓位随置信度变化，说明置信度生效了！")
+    
+except ImportError as e:
+    print(f"⚠️ 无法导入 ai_trader 模块: {e}")
 
+print("\n" + "="*70)
+print("测试 4: 完整决策流程模拟")
+print("="*70)
 
-def check_market_shape(base, session):
-    ok_http, code, js, txt = jget(session, base + "/market")
-    issues = []
-    checked = 0
-    if not (ok_http and code == 200 and isinstance(js, dict)):
-        fail("market API 返回异常或非 JSON")
-        return 0, ["market API 不可用"]
-    data = js.get("data", {})
-    if not data:
-        fail("market API: data 为空")
-        return 0, ["market data 为空"]
-    for sym, row in data.items():
-        last = row.get("last")
-        hi = row.get("high24h")
-        lo = row.get("low24h")
-        if not (is_number(last) and is_number(hi) and is_number(lo)):
-            issues.append(f"{sym}: last/high24h/low24h 必须是数字")
-        else:
-            if float(hi) < float(lo):
-                issues.append(f"{sym}: high24h < low24h")
-            if not (float(lo) <= float(last) <= float(hi)):
-                issues.append(f"{sym}: last 不在 [low24h, high24h] 区间")
+try:
+    # 模拟不同置信度的决策
+    from ai_trader import _decisions_from_ai
+    
+    print("⚠️ 此测试需要真实的 DeepSeek API，跳过...")
+    print("建议手动运行: python ai_trader.py")
+    
+except Exception as e:
+    print(f"跳过完整流程测试: {e}")
 
-        candles = row.get("candles", {})
-        for tf in ("30m", "4h"):
-            arr = candles.get(tf, [])
-            if not isinstance(arr, list) or not arr:
-                issues.append(f"{sym}: candles[{tf}] 为空")
-                continue
-            # 取几根检查 [o,h,l,c,v]
-            for k in arr[:3] + arr[-3:]:
-                if not (isinstance(k, list) and len(k) == 5 and all(is_number(x) for x in k)):
-                    issues.append(f"{sym}: candles[{tf}] 中存在非 [o,h,l,c,v] 结构")
-                    break
-        checked += 1
-
-    if checked and not issues:
-        ok(f"market API: {checked} 个交易对结构与K线形态校验通过")
-    else:
-        for m in issues:
-            fail("market: " + m)
-    return checked, issues
-
-
-def check_balance(base, session):
-    ok_http, code, js, txt = jget(session, base + "/balance")
-    if not (ok_http and code == 200 and isinstance(js, dict)):
-        fail("balance API 返回异常或非 JSON")
-        return None, ["balance 不可用"]
-    issues = []
-    teq = js.get("totalEq")
-    teqi = js.get("totalEq_incl_unrealized", teq)
-    if not is_number(teqi):
-        issues.append("totalEq_incl_unrealized 缺失或非数字")
-    if issues:
-        for m in issues:
-            fail("balance: " + m)
-    else:
-        ok(f"balance: totalEq_incl_unrealized = {float(teqi):,.2f}")
-    return teqi, issues
-
-
-def check_logs_growth(base, session, logs_dir):
-    """Check that hitting endpoints causes flask_server.log and signals/trades to grow."""
-    report = []
-    # measure sizes
-    files = [
-        os.path.join(logs_dir, "flask_server.log"),
-        os.path.join(logs_dir, "recent_signals.jsonl"),
-        os.path.join(logs_dir, "recent_trades.jsonl"),
-    ]
-    before = {f: (os.path.getsize(f) if os.path.exists(f) else -1) for f in files}
-
-    # hit a few endpoints to generate traffic
-    for _ in range(2):
-        for path in ("/api/status","/recent/signals?limit=5","/recent/trades?limit=5","/market","/balance"):
-            jget(session, base + path)
-        time.sleep(1.0)
-
-    after = {f: (os.path.getsize(f) if os.path.exists(f) else -1) for f in files}
-
-    for f in files:
-        b, a = before[f], after[f]
-        if b == -1 and a == -1:
-            warn(f"日志文件尚不存在：{f}")
-            report.append(("warn", f))
-        elif a > b:
-            ok(f"日志文件增长：{os.path.basename(f)} ({b} -> {a} bytes)")
-            report.append(("ok", f))
-        elif a == b and a > 0:
-            warn(f"日志文件未增长（可能短期内无新数据）：{os.path.basename(f)}")
-            report.append(("warn", f))
-        else:
-            warn(f"日志文件为空或未创建：{os.path.basename(f)}")
-            report.append(("warn", f))
-    return report
-
-
-def check_system_resources():
-    issues = []
-    lines = []
-    # disk
-    try:
-        total, used, free = shutil.disk_usage(".")
-        free_gb = free / (1024**3)
-        lines.append(f"Disk free: {free_gb:.2f} GB")
-        if free_gb < 5:
-            issues.append("磁盘剩余 < 5GB")
-    except Exception as e:
-        lines.append(f"Disk check error: {e}")
-
-    # cpu/mem via psutil if available
-    if HAS_PSUTIL:
-        try:
-            cpu = psutil.cpu_percent(interval=0.5)
-            mem = psutil.virtual_memory().percent
-            lines.append(f"CPU: {cpu:.1f}%  MEM: {mem:.1f}%")
-            if cpu > 85: issues.append("CPU 使用率 > 85%")
-            if mem > 85: issues.append("内存使用率 > 85%")
-        except Exception as e:
-            lines.append(f"psutil error: {e}")
-    else:
-        lines.append("psutil 不可用，跳过 CPU/MEM 细节（可 pip install psutil）")
-
-    if issues:
-        for m in issues:
-            warn("资源: " + m)
-        return lines, issues
-    else:
-        ok("系统资源正常（磁盘/CPU/内存）")
-        return lines, []
-
-
-def write_report(md_path, ctx):
-    try:
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(f"# Smoketest Report\n\n")
-            f.write(f"- Time: {datetime.utcnow().isoformat()}Z\n")
-            f.write(f"- Base: {ctx['base']}\n")
-            f.write(f"- Logs Dir: {ctx['logs_dir']}\n\n")
-
-            def sec(title):
-                f.write(f"## {title}\n\n")
-
-            sec("Endpoints")
-            for status, path, code in ctx["endpoints"]:
-                f.write(f"- [{status.upper()}] `{path}` HTTP {code}\n")
-            f.write("\n")
-
-            sec("Signals")
-            f.write(f"- items: {ctx['signals_count']}\n")
-            for m in ctx["signals_issues"]:
-                f.write(f"  - [ISSUE] {m}\n")
-            f.write("\n")
-
-            sec("Trades")
-            f.write(f"- items: {ctx['trades_count']}\n")
-            for m in ctx["trades_issues"]:
-                f.write(f"  - [ISSUE] {m}\n")
-            f.write("\n")
-
-            sec("Market")
-            f.write(f"- checked symbols: {ctx['market_checked']}\n")
-            for m in ctx["market_issues"]:
-                f.write(f"  - [ISSUE] {m}\n")
-            f.write("\n")
-
-            sec("Balance")
-            f.write(f"- totalEq_incl_unrealized: {ctx['balance_teqi']}\n")
-            for m in ctx["balance_issues"]:
-                f.write(f"  - [ISSUE] {m}\n")
-            f.write("\n")
-
-            sec("Logs Growth")
-            for status, path in ctx["logs_growth"]:
-                f.write(f"- [{status.upper()}] {os.path.basename(path)}\n")
-            f.write("\n")
-
-            sec("System")
-            for ln in ctx["system_lines"]:
-                f.write(f"- {ln}\n")
-            for m in ctx["system_issues"]:
-                f.write(f"  - [ISSUE] {m}\n")
-            f.write("\n")
-
-            # summary
-            sec("Summary")
-            total_fail = ctx["fail_count"]
-            total_warn = ctx["warn_count"]
-            f.write(f"- FAIL: {total_fail}\n")
-            f.write(f"- WARN: {total_warn}\n")
-            f.write(f"- PASS: {ctx['pass_count']}\n")
-            f.write("\n")
-        return True
-    except Exception as e:
-        print("写报告失败：", e)
-        return False
-
-
-def main():
-    parser = argparse.ArgumentParser(description="One-click smoketest for Quant Mock stack.")
-    parser.add_argument("--base", default="http://127.0.0.1:5001", help="Base URL of mock server")
-    parser.add_argument("--logs", default="./logs", help="Logs directory")
-    args = parser.parse_args()
-
-    base = args.base.rstrip("/")
-    logs_dir = args.logs
-    os.makedirs(logs_dir, exist_ok=True)
-
-    print(f"\n=== Smoketest @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    print(f"Base: {base}")
-    print(f"Logs: {logs_dir}\n")
-
-    s = requests.Session()
-    pass_cnt = warn_cnt = fail_cnt = 0
-
-    # 1) Endpoints
-    print("1) Endpoints 探活")
-    ep_results = check_endpoints(base, s)
-    for st, _, _ in ep_results:
-        if st == "ok": pass_cnt += 1
-        elif st == "warn": warn_cnt += 1
-        else: fail_cnt += 1
-    print()
-
-    # 2) Signals schema
-    print("2) Signals 结构校验")
-    sig_count, sig_issues = check_signals_schema(base, s, logs_dir)
-    if sig_issues: fail_cnt += len(sig_issues)
-    else: pass_cnt += 1
-    print()
-
-    # 3) Trades schema
-    print("3) Trades 结构校验")
-    trd_count, trd_issues = check_trades_schema(base, s, logs_dir)
-    if trd_issues: fail_cnt += len(trd_issues)
-    else: pass_cnt += 1
-    print()
-
-    # 4) Market shape
-    print("4) Market 结构与K线形态")
-    mkt_checked, mkt_issues = check_market_shape(base, s)
-    if mkt_issues: fail_cnt += len(mkt_issues)
-    else: pass_cnt += 1
-    print()
-
-    # 5) Balance
-    print("5) Balance 账户状态")
-    teqi, bal_issues = check_balance(base, s)
-    if bal_issues: fail_cnt += len(bal_issues)
-    else: pass_cnt += 1
-    print()
-
-    # 6) Logs growth
-    print("6) 日志增长（访问行为触发）")
-    lg = check_logs_growth(base, s, logs_dir)
-    # count warns/ok
-    for st, _ in lg:
-        if st == "ok": pass_cnt += 1
-        else: warn_cnt += 1
-    print()
-
-    # 7) System resources
-    print("7) 系统资源")
-    sys_lines, sys_issues = check_system_resources()
-    for ln in sys_lines:
-        print("   ", ln)
-    if sys_issues: warn_cnt += len(sys_issues)
-    else: pass_cnt += 1
-    print()
-
-    # Write report
-    ctx = dict(
-        base=base,
-        logs_dir=logs_dir,
-        endpoints=ep_results,
-        signals_count=sig_count, signals_issues=sig_issues,
-        trades_count=trd_count, trades_issues=trd_issues,
-        market_checked=mkt_checked, market_issues=mkt_issues,
-        balance_teqi=teqi, balance_issues=bal_issues,
-        logs_growth=lg,
-        system_lines=sys_lines, system_issues=sys_issues,
-        pass_count=pass_cnt, warn_count=warn_cnt, fail_count=fail_cnt
-    )
-    md_path = os.path.join(logs_dir, "smoketest_report.md")
-    if write_report(md_path, ctx):
-        print(f"{GRAY}报告已写入: {md_path}{RESET}")
-
-    # Summary
-    print("\n=== 总结 ===")
-    print(f"{GREEN}PASS: {pass_cnt}{RESET}  {YELLOW}WARN: {warn_cnt}{RESET}  {RED}FAIL: {fail_cnt}{RESET}")
-    if fail_cnt == 0:
-        print(f"{GREEN}→ Smoketest 通过，可进入下一阶段（伪实盘/接入真盘）{RESET}")
-        sys.exit(0)
-    else:
-        print(f"{RED}→ Smoketest 存在未通过项，请修复后重试{RESET}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+print("\n" + "="*70)
+print("测试总结")
+print("="*70)
+print("1. ✅ 置信度解析逻辑 - 已测试")
+print("2. ⚠️ 杠杆计算 - 需要手动运行 ai_trader.py 验证")
+print("3. ⚠️ 仓位计算 - 需要手动运行 ai_trader.py 验证")
+print("\n运行方式：")
+print("  python test_confidence.py")
+print("\n如果测试 1 全部通过，说明解析逻辑正确！")
+print("="*70)

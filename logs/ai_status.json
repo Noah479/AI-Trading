@@ -1,31 +1,31 @@
 {
-  "updated_at": "2025-10-28T20:38:42.563066+00:00",
+  "updated_at": "2025-10-29T20:25:06.248642+00:00",
   "engine": {
     "test_mode": false,
-    "invocations": 71
+    "invocations": 196
   },
   "account": {
-    "equity": 137643.64999999997
+    "equity": 136244.95
   },
   "decision": {
-    "symbol": "BTC-USDT",
-    "side": "buy",
-    "size": 0.3669,
-    "confidence": 0.65,
-    "reason": "RSI超卖反弹，MACD上穿信号"
+    "symbol": null,
+    "side": null,
+    "size": null,
+    "confidence": null,
+    "reason": null
   },
   "risk": {
     "consecutive_losses": 0,
     "cooldown": {
       "mode": "dynamic",
-      "cooldown_seconds": 551,
+      "cooldown_seconds": 604,
       "remaining_seconds": 0,
       "active": false
     }
   },
   "market": {
     "symbol": "BTC-USDT",
-    "volatility_24h_pct": 0.033477
+    "volatility_24h_pct": 0.04057
   },
   "gray_unlock": {
     "suggested": false,

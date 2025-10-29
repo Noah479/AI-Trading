@@ -33,9 +33,15 @@ class RiskConfig:
     max_symbol_exposure_pct: float = 0.30     # 单品种最大敞口 30%
     symbol_cooldown_sec: int = 180            # 品种冷却时间 3分钟
     
-    # 风险sizing
-    risk_per_trade_pct: float = 0.005         # 每笔交易风险 0.5%
+    # 🆕 动态仓位管理参数
+    risk_per_trade_pct: float = 0.005         # 基础风险 0.5%（会被动态调整）
+    risk_min_pct: float = 0.002               # 最小风险 0.2%
+    risk_max_pct: float = 0.015               # 最大风险 1.5%
     max_trade_ratio: float = 0.30             # 单笔最大交易占比 30%
+
+    # 🆕 波动率阈值
+    volatility_low_bps: int = 30              # 低波动阈值 30bps
+    volatility_high_bps: int = 100            # 高波动阈值 100bps
     
     # 价格保护
     max_slippage_bps: int = 20                # 最大滑点 20bps
@@ -60,6 +66,7 @@ class RiskState:
     day_open_equity: float                    # 日初权益
     realized_pnl_today: float = 0.0           # 今日已实现盈亏
     consecutive_losses: int = 0               # 连续亏损次数
+    consecutive_wins: int = 0                 # 🆕 连续盈利次数
     last_trade_ts: dict | None = None         # 最后交易时间戳
     symbol_exposure: dict | None = None       # 品种敞口
     open_positions: dict | None = None        # 持仓信息
@@ -226,6 +233,70 @@ class RiskManager:
 
         return cooldown_time
 
+    def calculate_dynamic_position_size(
+        self,
+        base_risk_pct: float,
+        ai_confidence: float,
+        volatility_bps: float,
+        consecutive_losses: int,
+        consecutive_wins: int,
+        equity: float
+    ) -> float:
+        """
+        🧠 动态仓位计算器
+        
+        Args:
+            base_risk_pct: 基础风险比例（例如 0.005 = 0.5%）
+            ai_confidence: AI 置信度 (0~1)
+            volatility_bps: 市场波动率（bps）
+            consecutive_losses: 连续亏损次数
+            consecutive_wins: 连续盈利次数
+            equity: 当前权益
+        
+        Returns:
+            调整后的风险金额
+        """
+        
+        # 📊 第一层：AI 置信度调整（0.5x ~ 1.5x）
+        conf_scale = 0.5 + ai_confidence  # 置信度 0 → 0.5x, 1 → 1.5x
+        
+        # 📈 第二层：波动率调整
+        if volatility_bps < self.cfg.volatility_low_bps:
+            # 低波动 → 提高仓位 20%
+            vola_scale = 1.2
+        elif volatility_bps > self.cfg.volatility_high_bps:
+            # 高波动 → 降低仓位 40%
+            vola_scale = 0.6
+        else:
+            # 正常波动 → 线性插值
+            ratio = (volatility_bps - self.cfg.volatility_low_bps) / max(1, self.cfg.volatility_high_bps - self.cfg.volatility_low_bps)
+            vola_scale = 1.2 - 0.6 * ratio  # 从 1.2 线性下降到 0.6
+        
+        # 🎯 第三层：账户状态调整
+        if consecutive_losses >= 2:
+            # 连亏 2 次以上 → 减半仓位
+            state_scale = 0.5
+        elif consecutive_wins >= 3:
+            # 连赢 3 次以上 → 提高仓位 30%
+            state_scale = 1.3
+        else:
+            state_scale = 1.0
+        
+        # 🧮 综合计算
+        adjusted_risk_pct = base_risk_pct * conf_scale * vola_scale * state_scale
+        
+        # ⚠️ 限制范围
+        adjusted_risk_pct = max(self.cfg.risk_min_pct, min(adjusted_risk_pct, self.cfg.risk_max_pct))
+        
+        # 💰 转换为风险金额
+        risk_amount = adjusted_risk_pct * equity
+        
+        # 📝 日志输出（调试用）
+        print(f"[Dynamic Sizing] base={base_risk_pct:.3%}, conf={conf_scale:.2f}x, "
+            f"vola={vola_scale:.2f}x, state={state_scale:.2f}x → final={adjusted_risk_pct:.3%}")
+        
+        return risk_amount
+
 
     def pre_trade_checks(
         self, 
@@ -253,52 +324,74 @@ class RiskManager:
             - order: 订单信息（通过时）
             - reason: 原因说明
         """
-                    
-        sym = decision["decision"]["symbol"]
-        side = decision["decision"]["side"]
 
-        # 🧠 智能提前解锁机制 (Adaptive Unlock)confidence
-        if self.state.consecutive_losses >= self.cfg.max_consecutive_losses:
-            last_ts = max(self.state.last_trade_ts.values(), default=0)
-            if last_ts > 0:
-                elapsed = _now_ts() - last_ts
-                if elapsed < self.current_cooldown:
-                    # 自动检测行情是否恢复
-                    new_vola = self._atr_proxy_bps(sym) / 1e4   # 现在 sym 已定义
-                    ai_confidence = decision["decision"].get("confidence", 0.8)
-                    if new_vola < 0.01 and ai_confidence > 0.8:
-                        print("🔓 市场波动恢复、AI信心高 → 自动提前解锁交易！")
-                        self.state.consecutive_losses = 0
-                    else:
-                        remaining = self.current_cooldown - elapsed
-                        return False, None, f"global cooldown (remaining {remaining:.0f}s)"
-        
-        # ========== 阶段 1: 快速失败检查 ==========
+# ========== 阶段 1: 快速失败检查 ==========
+        # ✅ 第一步：提取并验证决策结构
+        try:
+            d = decision.get("decision", {})
+            sym = d.get("symbol")
+            side = d.get("side")
+        except Exception:
+            return False, None, "invalid decision structure"
+
+        # ✅ 第二步：基础验证
+        if not sym:
+            return False, None, "missing symbol"
+
         if side not in ("buy", "sell", "hold"):
-            return False, None, "invalid side"
-        
+            return False, None, f"invalid side: {side}"
+
         if side == "hold":
             return False, None, "hold (no order)"
-        
-        # ✅ 价格检查提前（避免被冷却拦截）
+
+        # ✅ 第三步：价格验证
         px = market.get(sym, {}).get("price")
         if not px or px <= 0:
-            return False, None, "price unavailable"
-        
-        # 权益检查
+            return False, None, f"price unavailable for {sym}"
+
+        # ✅ 第四步：权益验证
         equity = self._estimate_equity()
         if equity <= 0:
             return False, None, "equity unavailable"
         
-        # ========== 阶段 2: Kill Switch ==========
+        # ========== ✅ 新增：阶段 1.5 - 3m 极端信号检测（最高优先级）==========
+        tf_data = market.get(sym, {}).get("tf", {})
+        ctx3m = tf_data.get("3m", {})
+        
+        if ctx3m:
+            rsi3m = float(ctx3m.get("rsi14") or 50.0)
+            adx3m = float(ctx3m.get("adx14") or 0.0)
+            
+            # 规则 1: 极端超买（RSI > 90）
+            if rsi3m > 90:
+                return False, None, f"3m RSI extreme overbought ({rsi3m:.1f})"
+            
+            # 规则 2: 极端超卖（RSI < 10）
+            if rsi3m < 10:
+                return False, None, f"3m RSI extreme oversold ({rsi3m:.1f})"
+            
+            # 规则 3: 极端趋势末期（ADX > 80）
+            if adx3m > 80:
+                return False, None, f"3m ADX extreme ({adx3m:.1f})"
+
+
+        # ========== 阶段 2: Kill Switch（日亏损限制） ==========
         dd = (equity - self.state.day_open_equity) / max(self.state.day_open_equity, 1e-9)
         if dd <= -self.cfg.daily_loss_limit_pct:
             return False, None, f"kill-switch: daily loss {dd:.2%}"
 
-        # 🧠 自适应冷却时间计算
+        # ========== 阶段 2.3: Invalidation Condition 检查 ==========
+        inv_cond = decision["decision"].get("exit_plan", {}).get("invalidation_condition")
+        if inv_cond:
+            is_invalid, reason = self._check_invalidation(inv_cond, sym, market)
+            if is_invalid:
+                return False, None, f"invalidation: {reason}"
+
+# ========== 阶段 2.5: 自适应冷却系统 ==========
+        # 第一步：计算动态冷却时间
         avg_drawdown = abs((equity - self.state.day_open_equity) / max(self.state.day_open_equity, 1e-9))
-        volatility = self._atr_proxy_bps(sym) / 1e4   # ATR 转为百分比
-        ai_confidence = decision["decision"].get("confidence", 0.7)  # 默认 0.7
+        volatility = self._atr_proxy_bps(sym) / 1e4  # 转为百分比（例如 0.02 = 2%）
+        ai_confidence = decision["decision"].get("confidence", 0.7)
 
         dynamic_cooldown = self.adaptive_cooldown(
             consecutive_losses=self.state.consecutive_losses,
@@ -307,27 +400,44 @@ class RiskManager:
             ai_confidence=ai_confidence
         )
 
-        self.current_cooldown = dynamic_cooldown
+        # 第二步：确定使用哪种冷却模式
+        if self.cfg.cooldown_global_sec <= 60:
+            # 测试模式：使用超短固定冷却（≤60秒）
+            cooldown_time = self.cfg.cooldown_global_sec
+            cooldown_mode = "fixed-test"
+        else:
+            # 生产模式：使用动态冷却
+            cooldown_time = dynamic_cooldown
+            cooldown_mode = "adaptive"
 
-        # 连续亏损冷却
+        # 第三步：保存当前冷却时间（供外部查询）
+        self.current_cooldown = cooldown_time
+
+        # 第四步：检查是否触发连亏冷却
         if self.state.consecutive_losses >= self.cfg.max_consecutive_losses:
-            if self.state.last_trade_ts:
+            if not self.state.last_trade_ts:
+                # 没有历史交易记录，跳过冷却检查
+                pass
+            else:
                 last_ts = max(self.state.last_trade_ts.values())
-
-                # ✅ 测试兼容逻辑：
-                # 如果配置的 cooldown_global_sec < 600（说明是测试用 10~400s），
-                # 优先使用固定时间；否则使用动态冷却。
-                if self.cfg.cooldown_global_sec < 600:
-                    cooldown_time = self.cfg.cooldown_global_sec
-                else:
-                    cooldown_time = dynamic_cooldown
-
-                # 🟩 调试输出当前使用的冷却时间
-                print(f"[Cooldown] using={cooldown_time}s (cfg={self.cfg.cooldown_global_sec}, dynamic={dynamic_cooldown})")
-
-                if _now_ts() - last_ts < cooldown_time:
-                    remaining = cooldown_time - (_now_ts() - last_ts)
-                    return False, None, f"global cooldown (loss streak, remaining {remaining:.0f}s)"
+                elapsed = _now_ts() - last_ts
+                
+                if elapsed < cooldown_time:
+                    # ✅ 第五步：智能提前解锁检测
+                    can_unlock = (
+                        volatility < 0.01 and           # 波动率 < 1%
+                        ai_confidence >= 0.80           # AI 置信度 >= 0.8
+                    )
+                    
+                    if can_unlock:
+                        print(f"🔓 [Adaptive Unlock] 波动={volatility:.2%}, 置信度={ai_confidence:.2f} → 提前解锁！")
+                        self.state.consecutive_losses = 0  # 重置连亏计数
+                        # 继续往下执行，不返回
+                    else:
+                        # 冷却中，拒绝交易
+                        remaining = cooldown_time - elapsed
+                        print(f"⏸️  [Cooldown] 模式={cooldown_mode}, 总时长={cooldown_time}s, 剩余={remaining:.0f}s")
+                        return False, None, f"global cooldown ({cooldown_mode}, {remaining:.0f}s left)"
 
         # ========== 阶段 3: 频率限制 ==========
         last_ts = self.state.last_trade_ts.get(sym, 0)
@@ -355,7 +465,7 @@ class RiskManager:
         reserve_usdt = self.cfg.balance_reserve_pct * equity
         spendable_usdt = max(0.0, avail_usdt - reserve_usdt)
 
-        # ========== 阶段 6: Sizing ==========
+        # ========== 阶段 6: 动态 Sizing ==========
         risk = decision["decision"].get("risk") or {}
         if isinstance(risk.get("stop_loss_pct"), (int, float)) and risk["stop_loss_pct"] > 0:
             stop_pct = float(risk["stop_loss_pct"])
@@ -363,7 +473,19 @@ class RiskManager:
             atr_bps = max(self.cfg.atr_floor_bps, self._atr_proxy_bps(sym))
             stop_pct = self.cfg.atr_mult_stop * atr_bps * 1e-4
 
-        R = self.cfg.risk_per_trade_pct * equity
+        # 🆕 使用动态仓位计算器
+        raw_conf = decision["decision"].get("confidence", 0.7)
+        ai_confidence = max(0.0, min(1.0, float(raw_conf)))
+
+        R = self.calculate_dynamic_position_size(
+            base_risk_pct=self.cfg.risk_per_trade_pct,
+            ai_confidence=ai_confidence,
+            volatility_bps=self._atr_proxy_bps(sym),
+            consecutive_losses=self.state.consecutive_losses,
+            consecutive_wins=self.state.consecutive_wins,
+            equity=equity
+        )
+        
         stop_distance = max(stop_pct * px, 1e-9)
         size_raw = R / stop_distance
 
@@ -386,6 +508,39 @@ class RiskManager:
         # ✅ 检查是否低于最小值
         if size < rule.lot_size_min:
             return False, None, f"size {size:.6f} below min {rule.lot_size_min}"
+
+        
+# ========== 阶段 7: 期望收益比检查 ==========
+        risk = decision["decision"].get("risk") or {}
+        tp_pct = float(risk.get("take_profit_pct") or 0.0)
+        sl_pct = float(risk.get("stop_loss_pct") or 0.0)
+
+        if tp_pct > 0 and sl_pct > 0:
+            # ✅ 第一步：计算原始风险回报比（不含手续费）
+            raw_r = tp_pct / sl_pct
+            
+            # ✅ 第二步：计算有效风险回报比（考虑双边手续费）
+            fee = self.cfg.fee_rate_bps * 1e-4  # 单边费率（例如 0.0008 = 0.08%）
+            total_fee_impact = 2 * fee           # 开仓 + 平仓
+            
+            # 有效止盈 = 止盈 - 手续费
+            # 有效止损 = 止损 + 手续费
+            effective_tp = max(0.0, tp_pct - total_fee_impact)
+            effective_sl = sl_pct + total_fee_impact
+            effective_r = effective_tp / max(1e-9, effective_sl)
+            
+            # ✅ 第三步：分级拦截
+            # 规则 1：原始 R < 1.5 直接拒绝（设计问题）
+            if raw_r < 1.5:
+                return False, None, f"raw R too low ({raw_r:.2f} < 1.5)"
+            
+            # 规则 2：有效 R < 1.0 拒绝（扣费后无利可图）
+            if effective_r < 1.0:
+                return False, None, f"effective R after fees ({effective_r:.2f} < 1.0)"
+            
+            # ✅ 第四步：记录日志（调试用）
+            print(f"[R-Check] raw={raw_r:.2f}, effective={effective_r:.2f}, "
+                  f"tp={tp_pct:.2%}, sl={sl_pct:.2%}, fee_impact={total_fee_impact:.2%}")
 
         # ========== 阶段 7: 风险合规检查 ==========
         open_risk_after = self._estimate_open_risk_after(sym, side, size, px, stop_pct)
@@ -427,11 +582,13 @@ class RiskManager:
         # 更新今日盈亏
         self.state.realized_pnl_today += realized_pnl
         
-        # 更新连亏计数
+        # 🆕 更新连亏/连赢计数
         if realized_pnl < 0:
             self.state.consecutive_losses += 1
+            self.state.consecutive_wins = 0  # 重置连赢
         elif realized_pnl > 0:
-            self.state.consecutive_losses = 0
+            self.state.consecutive_losses = 0  # 重置连亏
+            self.state.consecutive_wins += 1
         
         # 更新持仓
         if symbol not in self.state.open_positions:
@@ -574,3 +731,5 @@ class RiskManager:
                 if _now_ts() - ts < self.cfg.symbol_cooldown_sec
             ]
         }
+    
+

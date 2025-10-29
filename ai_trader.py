@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from deepseek_client import get_decision
 from risk_manager import RiskManager, RiskConfig, SymbolRule
 
+
+
 import random
-import talib
+# import talib
 import numpy as np
 import pandas as pd
 import csv
@@ -16,11 +18,6 @@ LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 AI_STATUS_FILE = LOG_DIR / "ai_status.json"
 
-
-# ====== 自适应触发节奏（可调） ======
-DYN_BASE_SEC = 45 * 60        # 基准间隔 45 分钟
-DYN_MIN_SEC  = 5 * 60         # 最短 5 分钟（再短易抖动）
-DYN_MAX_SEC  = 2 * 60 * 60    # 最长 2 小时（避免过久不评估）
 
 def _to_float(x, default=None):
     try:
@@ -124,6 +121,45 @@ SYMBOL_RULES = {
     "BNB-USDT": SymbolRule(price_tick=0.01,   lot_size_min=0.01,   lot_size_step=0.01),
 }
 
+def _preprocess_macd_signals(market: dict) -> dict:
+    """
+    为每个交易对添加 MACD 金叉/死叉标记
+    
+    判断逻辑：
+    - 金叉：前一周期 macd <= signal，当前周期 macd > signal
+    - 死叉：前一周期 macd >= signal，当前周期 macd < signal
+    """
+    for sym, row in market.items():
+        # === 30m 周期（主周期）===
+        macd = row.get("macd", 0)
+        macd_signal = row.get("macd_signal", 0)
+        macd_prev = row.get("macd_prev", 0)
+        macd_signal_prev = row.get("macd_signal_prev", 0)
+        
+        # 判断金叉/死叉
+        is_golden_cross = (macd_prev <= macd_signal_prev) and (macd > macd_signal)
+        is_death_cross = (macd_prev >= macd_signal_prev) and (macd < macd_signal)
+        
+        row["macd_golden_cross"] = is_golden_cross
+        row["macd_death_cross"] = is_death_cross
+        
+        # === 处理 3m 和 4h 周期 ===
+        tf = row.get("tf", {})
+        for period in ["3m", "4h"]:
+            if period not in tf:
+                continue
+            
+            p_data = tf[period]
+            p_macd = p_data.get("macd", 0)
+            p_macd_signal = p_data.get("macd_signal", 0)
+            p_macd_prev = p_data.get("macd_prev", 0)
+            p_macd_signal_prev = p_data.get("macd_signal_prev", 0)
+            
+            p_data["macd_golden_cross"] = (p_macd_prev <= p_macd_signal_prev) and (p_macd > p_macd_signal)
+            p_data["macd_death_cross"] = (p_macd_prev >= p_macd_signal_prev) and (p_macd < p_macd_signal)
+    
+    return market
+
 # ===================== 新增：进度打印工具 =====================
 class ProgressLogger:
     def __init__(self):
@@ -184,6 +220,7 @@ def _indicators_from_candles(candles_arr):
     """
     candles_arr: [[open,high,low,close,volume], ...] 旧->新
     输出：一套 EMA/RSI/ATR/MACD/ADX/BOLL 指标（最后一根）
+    ✅ 新增：返回前一周期 MACD 用于判断金叉/死叉
     """
     import numpy as np, talib
     closes = np.array([c[3] for c in candles_arr], dtype=float)
@@ -194,14 +231,29 @@ def _indicators_from_candles(candles_arr):
     ema_slow = float(np.nan_to_num(talib.EMA(closes, timeperiod=48)[-1]))
     rsi14    = float(np.nan_to_num(talib.RSI(closes, timeperiod=14)[-1]))
     atr14    = float(np.nan_to_num(talib.ATR(highs, lows, closes, timeperiod=14)[-1]))
-    macd, macd_signal, _ = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
-    macd = float(np.nan_to_num(macd[-1])); macd_signal = float(np.nan_to_num(macd_signal[-1]))
+    
+    # ✅ MACD 改进：同时返回当前值和前一周期
+    macd_arr, macd_signal_arr, _ = talib.MACD(closes, fastperiod=12, slowperiod=26, signalperiod=9)
+    macd = float(np.nan_to_num(macd_arr[-1]))
+    macd_signal = float(np.nan_to_num(macd_signal_arr[-1]))
+    
+    # ✅ 新增：前一周期的 MACD（用于判断趋势变化）
+    macd_prev = float(np.nan_to_num(macd_arr[-2])) if len(macd_arr) > 1 else macd
+    macd_signal_prev = float(np.nan_to_num(macd_signal_arr[-2])) if len(macd_signal_arr) > 1 else macd_signal
+    
     adx14 = float(np.nan_to_num(talib.ADX(highs, lows, closes, timeperiod=14)[-1]))
     bu, bm, bl = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-    boll_upper = float(np.nan_to_num(bu[-1])); boll_mid=float(np.nan_to_num(bm[-1])); boll_lower=float(np.nan_to_num(bl[-1]))
-    return dict(ema_fast=ema_fast, ema_slow=ema_slow, rsi14=rsi14, atr14=atr14,
-                macd=macd, macd_signal=macd_signal, adx14=adx14,
-                boll_upper=boll_upper, boll_mid=boll_mid, boll_lower=boll_lower)
+    boll_upper = float(np.nan_to_num(bu[-1]))
+    boll_mid = float(np.nan_to_num(bm[-1]))
+    boll_lower = float(np.nan_to_num(bl[-1]))
+    
+    return dict(
+        ema_fast=ema_fast, ema_slow=ema_slow, rsi14=rsi14, atr14=atr14,
+        macd=macd, macd_signal=macd_signal,
+        macd_prev=macd_prev, macd_signal_prev=macd_signal_prev,  # ✅ 新增
+        adx14=adx14,
+        boll_upper=boll_upper, boll_mid=boll_mid, boll_lower=boll_lower
+    )
 
 def fetch_market() -> dict:
     """
@@ -230,55 +282,114 @@ def fetch_market() -> dict:
             progress.warning(f"{s} 没有价格数据")
             continue
 
-        # 兼容两种返回：1) 列表 2) 多周期映射 {"30m":[...], "4h":[...]}
+        # ✅ 兼容三周期：3m + 30m + 4h
         candles_raw = v.get("candles")
-        c30, c4h = None, None
+        c3m, c30m, c4h = None, None, None
+
         if isinstance(candles_raw, dict):
-            c30 = candles_raw.get("30m")
+            c3m = candles_raw.get("3m")   # ✅ 新增
+            c30m = candles_raw.get("30m")
             c4h = candles_raw.get("4h")
         elif isinstance(candles_raw, (list, tuple)):
-            c30 = candles_raw  # 兼容旧结构：只有一套 K 线
+            c30m = candles_raw  # 兼容旧结构：默认当作 30m
 
-        # 兜底：若 30m 不足，构造一段平滑序列防止 talib 报错
-        if not c30 or len(c30) < 60:
-            import numpy as np
-            closes = np.array([price*(1+0.01*np.sin(i/8)) for i in range(120)], dtype=float)
-            c30 = [[closes[i], closes[i]*1.01, closes[i]*0.99, closes[i], 1.0] for i in range(len(closes))]
-            progress.warning(f"{s} 缺少 30m candles，使用模拟序列兜底")
+        progress.substep(f"{s} | 获取到 3m:{len(c3m or [])} / 30m:{len(c30m or [])} / 4h:{len(c4h or [])} 根K线")
 
-        # 兜底：若没有 4h，先用 30m 做个粗聚合（30m×8≈4h）
+        # ✅ 兜底逻辑：优先级 30m > 3m > 模拟数据
+        if not c30m or len(c30m) < 60:
+            if c3m and len(c3m) >= 60:
+                # 用 3m 聚合成 30m（每 10 根聚合为 1 根）
+                c30m = []
+                for i in range(0, len(c3m) - 10, 10):
+                    chunk = c3m[i:i+10]
+                    o = chunk[0][0]
+                    h = max(x[1] for x in chunk)
+                    l = min(x[2] for x in chunk)
+                    c = chunk[-1][3]
+                    vol = sum(x[4] for x in chunk)
+                    c30m.append([o, h, l, c, vol])
+                progress.warning(f"{s} 用 3m 聚合生成 30m ({len(c30m)} 根)")
+            else:
+                # 最终兜底：生成模拟数据
+                import numpy as np
+                closes = np.array([price*(1+0.01*np.sin(i/8)) for i in range(120)], dtype=float)
+                c30m = [[closes[i], closes[i]*1.01, closes[i]*0.99, closes[i], 1.0] for i in range(len(closes))]
+                progress.warning(f"{s} 缺少真实 K线，使用模拟序列兜底")
+
+        # ✅ 兜底 4h：30m × 8 聚合
         if not c4h or len(c4h) < 60:
-            c4h = c30[::8]
+            if c30m and len(c30m) >= 8:
+                c4h = []
+                for i in range(0, len(c30m) - 8, 8):
+                    chunk = c30m[i:i+8]
+                    o = chunk[0][0]
+                    h = max(x[1] for x in chunk)
+                    l = min(x[2] for x in chunk)
+                    c = chunk[-1][3]
+                    vol = sum(x[4] for x in chunk)
+                    c4h.append([o, h, l, c, vol])
+                progress.substep(f"{s} 用 30m 聚合生成 4h ({len(c4h)} 根)")
+            else:
+                c4h = c30m[::8] if c30m else []  # 最终兜底：稀疏采样
 
-        # === 指标计算（正确使用 [o,h,l,c,vol] 的索引） ===
-        base30 = _indicators_from_candles(c30)
-        ctx4h  = _indicators_from_candles(c4h) if c4h else None
+        # ✅ 修复：兜底 3m（如果没有，从最近 72 根 30m 拆分）
+        if not c3m or len(c3m) < 60:
+            if c30m and len(c30m) > 0:
+                c3m = []
+                # ✅ 关键修改：只取最近 72 根 30m（相当于 36 小时）
+                recent_30m = c30m[-72:] if len(c30m) >= 72 else c30m
+                
+                for candle in recent_30m:
+                    # 将 1 根 30m 拆成 10 根 3m（价格微调模拟）
+                    o, h, l, c, vol = candle
+                    step = (c - o) / 10
+                    for j in range(10):
+                        mini_o = o + step * j
+                        mini_c = o + step * (j + 1)
+                        mini_h = max(mini_o, mini_c) * 1.001
+                        mini_l = min(mini_o, mini_c) * 0.999
+                        c3m.append([mini_o, mini_h, mini_l, mini_c, vol / 10])
+                
+                progress.substep(f"{s} 用最近 {len(recent_30m)} 根 30m 拆分生成 3m ({len(c3m)} 根)")
 
-        # === 调试输出 ===
+        # ✅ 计算三个周期的指标
+        base3m = _indicators_from_candles(c3m) if c3m and len(c3m) >= 30 else None
+        base30m = _indicators_from_candles(c30m) if c30m and len(c30m) >= 30 else None
+        ctx4h = _indicators_from_candles(c4h) if c4h and len(c4h) >= 30 else None
+
+        # ✅ 三周期调试输出
+        debug_msg = f"{s} |"
+        if base3m:
+            debug_msg += f" 3m: RSI={base3m['rsi14']:.1f} ADX={base3m['adx14']:.1f} |"
+        if base30m:
+            debug_msg += f" 30m: RSI={base30m['rsi14']:.1f} MACD={base30m['macd']:.4f} ADX={base30m['adx14']:.1f}"
         if ctx4h:
-            progress.substep(
-                f"{s} | 30m: RSI={base30['rsi14']:.1f}, MACD={base30['macd']:.4f}, ADX={base30['adx14']:.1f} | "
-                f"4h: RSI={ctx4h['rsi14']:.1f}, ADX={ctx4h['adx14']:.1f}"
-            )
-        else:
-            progress.substep(
-                f"{s} | 30m: RSI={base30['rsi14']:.1f}, MACD={base30['macd']:.4f}, ADX={base30['adx14']:.1f}"
-            )
+            debug_msg += f" | 4h: RSI={ctx4h['rsi14']:.1f} ADX={ctx4h['adx14']:.1f}"
 
-        # === 汇总（30m 扁平 + 可选的 4h 背景） ===
+        progress.substep(debug_msg)
+
+        # ✅ 汇总：30m 扁平 + 3m/4h 嵌套
         row = {
             "price": price,
-            "last":  price,
+            "last": price,
             "high24h": float(v.get("high24h") or 0.0),
-            "low24h":  float(v.get("low24h")  or 0.0),
-            **base30
+            "low24h": float(v.get("low24h") or 0.0),
+            **(base30m or {})  # 30m 指标作为主指标（扁平）
         }
+
+        # ✅ 多周期嵌套（供高级策略使用）
+        row["tf"] = {}
+        if base3m:
+            row["tf"]["3m"] = base3m
         if ctx4h:
-            row["tf"] = {"4h": ctx4h}
+            row["tf"]["4h"] = ctx4h
 
         m[s] = row
 
     progress.success(f"获取到 {len(m)} 个交易对 (含 30m & 4h 指标)")
+    # ✅ 在这里添加（return 之前）
+    m = _preprocess_macd_signals(m)
+
     return m
 
 
@@ -386,6 +497,106 @@ def _log_decision_to_csv(decision: dict, meta: dict, market: dict, log_dir="logs
 
     print(f"🧾 已写入日志: {file_path}")
 
+# === 新增：记录所有币种信号到 CSV（含 HOLD） ===
+def _reason_explain_from_indicators(row: dict) -> str:
+    """给 HOLD/本地信号生成可读理由（中文）。"""
+    try:
+        adx = float(row.get("adx14") or 0.0)
+    except Exception:
+        adx = 0.0
+    try:
+        rsi = float(row.get("rsi14") or 50.0)
+    except Exception:
+        rsi = 50.0
+    try:
+        macd = float(row.get("macd") or 0.0)
+        macds = float(row.get("macd_signal") or 0.0)
+    except Exception:
+        macd, macds = 0.0, 0.0
+
+    emaf = row.get("ema_fast")
+    emas = row.get("ema_slow")
+    trend_up = (emaf is not None and emas is not None and emaf > emas)
+
+    # === 根据指标逻辑生成中文理由 ===
+    if adx < 20:
+        return "ADX<20震荡观望"
+    if macd >= macds and adx >= 20:
+        return "MACD金叉+ADX走强" if trend_up else "MACD金叉但均线未多头"
+    if macd < macds and trend_up and 20 <= adx < 25:
+        return "趋势多但动能转弱，谨慎观望"
+    if rsi < 30:
+        return "RSI超卖反弹观察"
+    if rsi > 70:
+        return "RSI超买回落观察"
+    return "数据中性，继续等待"
+
+
+def _log_all_signals_to_csv(trading_decisions: dict, market: dict, log_dir: str | None = None):
+    """
+    将 TRADING_DECISIONS（含所有币种）记录到 logs/all_signals.csv
+    每次运行写入6行（或 N 行）：每个币一行，哪怕是 HOLD 也会写入。
+    """
+    import csv, os
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    # 默认路径
+    log_dir = str(Path("logs"))
+    os.makedirs(log_dir, exist_ok=True)
+    path = str(Path(log_dir) / "all_signals.csv")
+
+    headers = [
+        "ts","symbol","signal","quantity","confidence","leverage","ai_reason",
+        "adx14","rsi14","macd","macd_signal","ema_fast","ema_slow","price"
+    ]
+    write_header = not os.path.exists(path)
+
+    ts = (trading_decisions.get("meta") or {}).get("current_time")
+    if not ts:
+        ts = datetime.now(timezone.utc).isoformat()
+
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=headers)
+        if write_header:
+            w.writeheader()
+
+        for coin, body in (trading_decisions or {}).items():
+            if coin == "meta":
+                continue
+            args = (body.get("trade_signal_args") or {})
+            signal = (args.get("signal") or "hold").lower()
+            symbol = f"{coin}-USDT"
+
+            mrow = market.get(symbol, {}) if isinstance(market, dict) else {}
+            # 如果 signal 是 hold，就强制使用本地解释
+            reason = (
+                _reason_explain_from_indicators(mrow)
+                if signal == "hold"
+                else (args.get("ai_reason") or _reason_explain_from_indicators(mrow))
+            )
+
+            rec = {
+                "ts": ts,
+                "symbol": symbol,
+                "signal": signal,
+                "quantity": args.get("quantity", 0.0),
+                "confidence": args.get("confidence", 0.5),
+                "leverage": args.get("leverage", ""),
+                "ai_reason": reason,
+                "adx14": mrow.get("adx14"),
+                "rsi14": mrow.get("rsi14"),
+                "macd": mrow.get("macd"),
+                "macd_signal": mrow.get("macd_signal"),
+                "ema_fast": mrow.get("ema_fast"),
+                "ema_slow": mrow.get("ema_slow"),
+                "price": mrow.get("price"),
+            }
+            w.writerow(rec)
+
+    print(f"🧾 已写入日志(全量): {path}")
+
+
 def compute_local_signal(market: dict):
     """
     返回: (symbol, side, score) 轻量信号，用于“是否触发 AI 决策”的事件驱动开关
@@ -410,28 +621,26 @@ def compute_local_signal(market: dict):
             best = (sym, side, score)
     return best
 
-def _dynamic_ai_interval_secs(row: dict, ctx4h: dict=None, in_pos: bool=False) -> int:
+def _dynamic_ai_interval_secs(row: dict, ctx4h: dict=None, ctx3m: dict=None, in_pos: bool=False) -> int:
     """
-    根据 30m/4h 指标与持仓状态，返回下一次针对该币触发 AI 的动态秒数。
-    规则（乘法叠加，最后夹在 [DYN_MIN_SEC, DYN_MAX_SEC]）：
-      - 趋势强(ADX↑) → 缩短
-      - 波动大(vol24↑) → 拉长（避免追涨杀跌）
-      - RSI 极值(>70 或 <30) → 缩短（更关注极端）
-      - 4h 强势 → 略缩短
-      - 有持仓 → 明显缩短（更密切盯盘）
-      - 加 ±15% 抖动，避免固定节奏
+    根据 3m/30m/4h 指标与持仓状态，返回下一次针对该币触发 AI 的动态秒数。
     """
-    base = float(DYN_BASE_SEC)
+    base = float(BASE_INTERVAL)
 
-    adx   = float(row.get("adx14") or 0.0)
-    rsi   = float(row.get("rsi14") or 50.0)
-    vol24 = _vol24_from_market_row(row) or 0.0  # (high-low)/last
+    # ✅ 提取多周期指标
+    adx30 = float(row.get("adx14") or 0.0)
+    rsi30 = float(row.get("rsi14") or 50.0)
     adx4h = float((ctx4h or {}).get("adx14") or 0.0)
+    adx3m = float((ctx3m or {}).get("adx14") or 0.0)  # ✅ 新增
+    rsi3m = float((ctx3m or {}).get("rsi14") or 50.0)  # ✅ 新增
+    
+    vol24 = _vol24_from_market_row(row) or 0.0
 
-    # 1) ADX：0~50 常见，越大越强，区间映射到 0.4~1.2
-    adx_factor = max(0.4, min(1.2, 1.2 - 0.02 * min(adx, 50)))  # adx=30 → 0.6，adx=40 → 0.4
+    # 1) ADX 综合评分（多周期加权）
+    adx_combined = (adx3m * 0.3 + adx30 * 0.5 + adx4h * 0.2)  # ✅ 3m 权重 30%
+    adx_factor = max(0.4, min(1.2, 1.2 - 0.02 * min(adx_combined, 50)))
 
-    # 2) 波动率：>5% 拉长 1.4；<2% 略缩 0.9
+    # 2) 波动率
     if vol24 >= 0.05:
         vol_factor = 1.4
     elif vol24 <= 0.02:
@@ -439,25 +648,197 @@ def _dynamic_ai_interval_secs(row: dict, ctx4h: dict=None, in_pos: bool=False) -
     else:
         vol_factor = 1.0
 
-    # 3) RSI 极值/中性
-    if rsi >= 70 or rsi <= 30:
-        rsi_factor = 0.8   # 极端 → 关注更密
-    elif 45 <= rsi <= 55:
-        rsi_factor = 1.1   # 中性 → 放宽一点
+    # 3) RSI 极值（优先看 3m）
+    if rsi3m >= 70 or rsi3m <= 30:
+        rsi_factor = 0.7  # ✅ 3m 极值 → 高度关注
+    elif rsi30 >= 70 or rsi30 <= 30:
+        rsi_factor = 0.8  # 30m 极值
+    elif 45 <= rsi30 <= 55:
+        rsi_factor = 1.1  # 中性
     else:
         rsi_factor = 1.0
 
-    # 4) 4h 背景趋势：强则再缩短一点
+    # 4) 4h 背景趋势
     tf_factor = 0.9 if adx4h >= 25 else 1.0
 
-    # 5) 有持仓则更密（例如 0.7）
+    # 5) 持仓状态
     pos_factor = 0.7 if in_pos else 1.0
 
-    # 6) 少许抖动 ±15%
+    # 6) 抖动
     jitter = 1.0 + (random.random() - 0.5) * 0.30
 
     sec = base * adx_factor * vol_factor * rsi_factor * tf_factor * pos_factor * jitter
-    return int(max(DYN_MIN_SEC, min(DYN_MAX_SEC, sec)))
+    return int(max(MIN_AI_INTERVAL_SEC, min(MAX_AI_INTERVAL_SEC, sec)))
+
+def _calculate_smart_leverage(
+    ai_confidence: float,
+    market_row: dict,
+    consecutive_losses: int = 0,
+    max_leverage: float = 10.0
+) -> float:
+    """
+    多因素智能杠杆计算
+    
+    Args:
+        ai_confidence: AI 置信度 (0.5-1.0)
+        market_row: 市场数据（包含 ADX, RSI, 波动率等）
+        consecutive_losses: 连续亏损次数
+        max_leverage: 最大杠杆倍数（默认 10 倍）
+    
+    Returns:
+        float: 最终杠杆倍数 (0.5-max_leverage)
+    """
+    # ===== 1. 基础杠杆（置信度驱动）=====
+    # 置信度映射：0.5→1x, 0.65→2x, 0.8→4x, 0.95→8x
+    if ai_confidence < 0.55:
+        base_lev = 1.0
+    elif ai_confidence < 0.7:
+        base_lev = 1.0 + (ai_confidence - 0.55) / 0.15 * 1.0  # 1-2x
+    elif ai_confidence < 0.85:
+        base_lev = 2.0 + (ai_confidence - 0.7) / 0.15 * 2.0   # 2-4x
+    else:
+        base_lev = 4.0 + (ai_confidence - 0.85) / 0.15 * 4.0  # 4-8x
+    
+    # ===== 2. ADX 趋势调整（±50%）=====
+    adx30 = float(market_row.get("adx14") or 0.0)
+    tf_data = market_row.get("tf", {})
+    adx4h = float(tf_data.get("4h", {}).get("adx14") or 0.0)
+    adx3m = float(tf_data.get("3m", {}).get("adx14") or 0.0)
+    
+    # 多周期 ADX 综合（3m:30%, 30m:50%, 4h:20%）
+    adx_combined = adx3m * 0.3 + adx30 * 0.5 + adx4h * 0.2
+    
+    if adx_combined < 15:
+        adx_factor = 0.5  # 震荡市：杠杆减半
+    elif adx_combined < 25:
+        adx_factor = 0.7 + (adx_combined - 15) / 10 * 0.3  # 0.7-1.0
+    elif adx_combined < 40:
+        adx_factor = 1.0 + (adx_combined - 25) / 15 * 0.3  # 1.0-1.3
+    else:
+        adx_factor = 1.3 + min((adx_combined - 40) / 20 * 0.2, 0.2)  # 最高 1.5x
+    
+    # ===== 3. 波动率调整（±30%）=====
+    vol24 = _vol24_from_market_row(market_row) or 0.0
+    
+    if vol24 < 0.02:
+        vol_factor = 1.2  # 低波动：适度提升杠杆
+    elif vol24 < 0.05:
+        vol_factor = 1.0  # 正常波动
+    elif vol24 < 0.10:
+        vol_factor = 0.8  # 高波动：降低杠杆
+    else:
+        vol_factor = 0.6  # 极端波动：大幅降低
+    
+    # ===== 4. RSI 极值惩罚（-50%）=====
+    rsi30 = float(market_row.get("rsi14") or 50.0)
+    rsi3m = float(tf_data.get("3m", {}).get("rsi14") or 50.0)
+    
+    rsi_factor = 1.0
+    if rsi3m >= 75 or rsi3m <= 25:
+        rsi_factor = 0.5  # 3m 极端超买超卖：杠杆减半
+    elif rsi30 >= 70 or rsi30 <= 30:
+        rsi_factor = 0.7  # 30m 超买超卖：降低 30%
+    
+    # ===== ✅ 新增：5. MACD 趋势确认（±15%）=====
+    macd = float(market_row.get("macd") or 0.0)
+    macd_signal = float(market_row.get("macd_signal") or 0.0)
+
+    macd_factor = 1.0
+    if (macd > macd_signal) and (macd > 0):
+        macd_factor = 1.15  # 金叉且在零轴上方：+15%
+    elif (macd < macd_signal) and (macd < 0):
+        macd_factor = 0.85  # 死叉且在零轴下方：-15%
+    elif abs(macd - macd_signal) < abs(macd * 0.1):
+        macd_factor = 0.95  # MACD 粘合（即将变盘）：-5%
+
+    # ===== 5. 连败惩罚（每次 -0.5x）=====
+    loss_penalty = max(0.5, 1.0 - consecutive_losses * 0.15)  # 最多降到 0.5x
+    
+    # ===== 6. 综合计算（加入 MACD）=====
+    final_lev = base_lev * adx_factor * vol_factor * rsi_factor * macd_factor * loss_penalty
+    
+    # ===== 7. 限制范围 =====
+    final_lev = max(0.5, min(max_leverage, final_lev))
+    
+    # ===== 8. 调试输出 =====
+    print(f"\n{'='*70}")
+    print(f"[智能杠杆计算]")
+    print(f"  AI 置信度: {ai_confidence:.2f} → 基础杠杆: {base_lev:.2f}x")
+    print(f"  ADX (3m/30m/4h): {adx3m:.1f}/{adx30:.1f}/{adx4h:.1f} → 综合 {adx_combined:.1f} → 系数 {adx_factor:.2f}x")
+    print(f"  24h 波动率: {vol24:.2%} → 系数 {vol_factor:.2f}x")
+    print(f"  RSI (3m/30m): {rsi3m:.1f}/{rsi30:.1f} → 系数 {rsi_factor:.2f}x")
+    # ✅ 新增这一行
+    print(f"  MACD 趋势: {macd:.4f} vs 信号 {macd_signal:.4f} → 系数 {macd_factor:.2f}x")
+    print(f"  连续亏损: {consecutive_losses} 次 → 惩罚 {loss_penalty:.2f}x")
+    print(f"  最终杠杆: {final_lev:.2f}x (上限 {max_leverage}x)")
+    print(f"{'='*70}\n")
+    
+    return round(final_lev, 2)
+
+
+def _calculate_smart_position(
+    ai_confidence: float,
+    market_row: dict,
+    equity: float,
+    consecutive_losses: int = 0,
+    max_position_pct: float = 0.30  # 单笔最大 30% 资金
+) -> float:
+    """
+    智能仓位计算（基于 Kelly 公式改进版）
+    
+    Args:
+        ai_confidence: AI 置信度 (0.5-1.0)
+        market_row: 市场数据（包含 ADX, RSI, 波动率等）
+        equity: 当前账户权益（USDT）
+        consecutive_losses: 连续亏损次数
+        max_position_pct: 单笔最大资金比例（默认 30%）
+    
+    Returns:
+        float: 建议仓位金额（USDT）
+    """
+    # ===== 1. 基础仓位比例（置信度驱动）=====
+    if ai_confidence < 0.55:
+        base_pct = 0.03  # 3%
+    elif ai_confidence < 0.70:
+        base_pct = 0.03 + (ai_confidence - 0.55) / 0.15 * 0.07  # 3%-10%
+    elif ai_confidence < 0.85:
+        base_pct = 0.10 + (ai_confidence - 0.70) / 0.15 * 0.10  # 10%-20%
+    else:
+        base_pct = 0.20 + (ai_confidence - 0.85) / 0.15 * 0.10  # 20%-30%
+    
+    # ===== 2. 波动率调整（币圈适配版）=====
+    vol24 = _vol24_from_market_row(market_row) or 0.0
+    if vol24 < 0.03:
+        vol_factor = 1.2  # 低波动（<3%）+20%
+    elif vol24 < 0.08:
+        vol_factor = 1.0  # 正常波动（3%-8%）
+    elif vol24 < 0.15:
+        vol_factor = 0.8  # 高波动（8%-15%）-20%
+    else:
+        vol_factor = 0.6  # 极端波动（>15%）-40%
+    
+    
+    # ===== 5. 连亏惩罚（每次 -20%）=====
+    loss_penalty = max(0.3, 1.0 - consecutive_losses * 0.20)
+    
+    # ===== 3. 简化综合计算（只保留波动率和连亏惩罚）=====
+    final_pct = base_pct * vol_factor * loss_penalty
+    final_pct = max(0.01, min(max_position_pct, final_pct))  # 限制 1%-30%
+    
+    position_value = equity * final_pct
+    
+    # ===== 7. 调试输出 =====
+    print(f"\n{'='*70}")
+    print(f"[智能仓位计算（简化版）]")
+    print(f"  账户权益: {equity:.2f} USDT")
+    print(f"  置信度: {ai_confidence:.2f} → 基础比例: {base_pct:.2%}")
+    print(f"  24h 波动率: {vol24:.2%} → 系数 {vol_factor:.2f}x")
+    print(f"  连续亏损: {consecutive_losses} 次 → 惩罚 {loss_penalty:.2f}x")
+    print(f"  ✅ 最终仓位: {position_value:.2f} USDT ({final_pct:.2%})")
+    print(f"  📝 说明: ADX/RSI 调整已移至 AI 杠杆计算")
+    print(f"{'='*70}\n")
+    
+    return round(position_value, 2)
 
 def _decisions_from_ai(market: dict, balance: dict) -> dict:
     """DeepSeek 决策 → TRADING_DECISIONS JSON"""
@@ -476,25 +857,56 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
     start_ai = time.time()
     
     decision, meta = get_decision(market, bal_snapshot, recent_trades=[], constraints=constraints)
-    
+
     d = decision.get("decision", {})
-    conf = float(d.get("confidence") or 0.5)
-    lev  = d.get("leverage")
-    if lev is None:
-        base = 1.0 + (conf - 0.5) * 8.0
-        lev  = max(0.5, min(25.0, base))
+    sym = d.get("symbol")
+
+    # ✅ 关键修改：优先使用 AI 返回的置信度
+    conf_raw = d.get("confidence")
+    if conf_raw is not None:
+        try:
+            conf = float(conf_raw)
+            # 确保在合理范围内
+            conf = max(0.30, min(0.95, conf))
+        except:
+            conf = 0.55  # 解析失败才用默认值
+            print(f"⚠️ [置信度解析失败] 使用默认值 0.55")
+    else:
+        conf = 0.55  # AI 完全没返回
+        print(f"⚠️ [置信度缺失] AI 未返回置信度，使用默认值 0.55")
+
+    # ✅ 新增：日志输出（调试用）
+    print(f"🎯 [AI 置信度] {conf:.2f} (原始值: {conf_raw}, 类型: {type(conf_raw).__name__})")
+
+    lev = d.get("leverage")
+
+    # ✅ 使用智能杠杆系统
+    if lev is None and sym in market:
+        # 获取风控状态（连续亏损次数）
+        cfg = RiskConfig(symbol_rules=SYMBOL_RULES)
+        rm = RiskManager(cfg)
+        consecutive_losses = getattr(rm.state, "consecutive_losses", 0)
+        
+        # ✅ 新增：调用前打印输入参数
+        print(f"📊 [杠杆计算输入] 置信度={conf:.2f}, 币种={sym}, 连败={consecutive_losses}")
+        
+        # 调用智能杠杆函数
+        lev = _calculate_smart_leverage(
+            ai_confidence=conf,
+            market_row=market.get(sym, {}),
+            consecutive_losses=consecutive_losses,
+            max_leverage=25.0
+        )
+        
+        # ✅ 新增：调用后打印结果
+        print(f"📈 [杠杆计算结果] {lev:.2f}x")
+    else:
+        lev = float(lev or 1.0)  # 如果 DeepSeek 返回了杠杆，优先使用
+
     d["leverage"] = round(float(lev), 2)
-    progress.substep(f"📈 自动分配杠杆: {d['leverage']:.2f}x（置信度 {conf:.2f}）")
+    progress.substep(f"📈 智能杠杆: {d['leverage']:.2f}x (置信度 {conf:.2f})")
 
     ai_time = time.time() - start_ai
-
-    # ✅ 详细检查返回值
-    print(f"\n{'='*70}")
-    print(f"[决策返回值检查]")
-    print(f"  decision 类型: {type(decision)}")
-    print(f"  decision 内容: {decision}")
-    print(f"  meta: {meta}")
-    print(f"{'='*70}\n")
     
     # ✅ 修改判断逻辑
     if isinstance(meta, dict) and meta.get('error'):
@@ -526,14 +938,26 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
     progress.substep(f"初始化 {len(SYMBOLS)} 个交易对为 HOLD 状态")
     for sym in SYMBOLS:
         coin = sym.split("-")[0]
+        row = market.get(sym, {})
+        
+        # ✅ 根据市场状态动态计算 HOLD 的置信度
+        adx = float(row.get("adx14") or 0.0)
+        rsi = float(row.get("rsi14") or 50.0)
+        
+        hold_confidence = 0.5  # 默认
+        if adx < 15:  # 震荡市
+            hold_confidence = 0.6
+        elif 45 <= rsi <= 55:  # RSI 中性
+            hold_confidence = 0.55
+        
         td[coin] = {
             "trade_signal_args": {
                 "coin": coin,
                 "signal": "hold",
                 "quantity": _pos_qty(balance, sym),
                 "leverage": (balance.get("positions") or {}).get(sym, {}).get("leverage", None),
-                "confidence": 0.5,  # 默认中性信心度
-                "ai_reason": "等待AI信号"  # 默认理由
+                "confidence": hold_confidence,  # ✅ 动态置信度
+                "ai_reason": _reason_explain_from_indicators(row)  # ✅ 本地理由
             }
         }
 
@@ -544,8 +968,45 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
         side = d.get("side")
         
         if sym in SYMBOLS and side in ("buy", "sell"):
-            progress.substep(f"AI 建议: {side.upper()} {sym}, 数量: {d.get('size')}")
-            
+            progress.substep(f"AI 建议: {side.upper()} {sym}")
+                    
+            # ===== ✅ 新增：计算智能仓位 =====
+            equity = float(bal_snapshot["USDT"]["available"])
+            consecutive_losses = getattr(rm.state, "consecutive_losses", 0)
+
+            # ✅ 新增：调用前打印输入参数
+            print(f"💰 [仓位计算输入] 置信度={conf:.2f}, 权益={equity:.2f}, 连败={consecutive_losses}")
+
+            position_value = _calculate_smart_position(
+                ai_confidence=conf,
+                market_row=market.get(sym, {}),
+                equity=equity,
+                consecutive_losses=consecutive_losses,
+                max_position_pct=0.30
+            )
+
+            # ✅ 新增：调用后打印结果
+            print(f"💵 [仓位计算结果] {position_value:.2f} USDT")
+                    
+            # ===== ✅ 覆盖 AI 的 size =====
+            ai_size = d.get("size")
+            if ai_size:
+                # AI 返回了 size，计算对应的金额
+                price = float(market[sym]["price"])
+                ai_value = float(ai_size) * price
+                # 取本地计算和 AI 建议的较小值（保守策略）
+                final_value = min(position_value, ai_value)
+                progress.substep(f"  AI size={ai_size:.4f} ({ai_value:.2f} USDT), 本地={position_value:.2f}, 取较小值={final_value:.2f}")
+            else:
+                final_value = position_value
+                progress.substep(f"  AI 未返回 size，使用本地计算: {final_value:.2f} USDT")
+                    
+            # ===== ✅ 更新决策中的 size =====
+            price = float(market[sym]["price"])
+            d["size"] = final_value / price
+            progress.substep(f"  最终下单数量: {d['size']:.6f} {sym.split('-')[0]}")
+                    
+            # 风控检查（现在用的是本地计算的 size）
             approved, order, reason = rm.pre_trade_checks(decision, market, balance)
             
             equity = rm._estimate_equity()
@@ -555,61 +1016,61 @@ def _decisions_from_ai(market: dict, balance: dict) -> dict:
 
             ai_reason = (d.get("rationale") or d.get("reason"))
             
+            # ✅ 新增：处理 exit_plan
+            exit_plan = d.get("exit_plan") or {}
+            
+            # 兼容两种字段名
+            stop_loss = exit_plan.get("stop_loss_pct") or exit_plan.get("stop_loss") or \
+                        (d.get("risk") or {}).get("stop_loss_pct")
+                        
+            take_profit = exit_plan.get("take_profit_pct") or exit_plan.get("profit_target") or \
+                        (d.get("risk") or {}).get("take_profit_pct")
+
+            invalidation = exit_plan.get("invalidation_condition") or "无"
+
             if approved and order and float(order.get("size", 0)) > 0:
                 progress.success(f"生成订单: {side} {order['size']} {sym}")
                 
                 td[coin]["trade_signal_args"].update({
-                    "signal": "entry" if side == "buy" else ("close" if side == "sell" else "hold"),
+                    "signal": side,
                     "quantity": float(order["size"]) if approved and order else _pos_qty(balance, sym),
                     "order_type": order.get("order_type", d.get("order_type","market")),
                     "limit_price": order.get("limit_price"),
                     "max_slippage_bps": d.get("max_slippage_bps"),
                     "confidence": d.get("confidence"),
-                    "profit_target": (d.get("risk") or {}).get("take_profit_pct"),
-                    "stop_loss": (d.get("risk") or {}).get("stop_loss_pct"),
-                    "invalidation_condition": None,
-                    "ai_reason": ai_reason   # ★ 新增：把模型理由放进信号里，后续用于前端
+                    "leverage": d.get("leverage"),  # ✅ 新增这一行！
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "invalidation_condition": invalidation,
+                    "ai_reason": ai_reason
                 })
             else:
-                # 未通过风控：也要把 AI 的置信度/理由写入，避免前端为 null
+                # ❌ 这里也要加！
                 td[coin]["trade_signal_args"].update({
                     "confidence": d.get("confidence"),
-                    "ai_reason": ai_reason,                      # 建议统一这个字段名
+                    "leverage": d.get("leverage"),  # ✅ 新增这一行！
+                    "ai_reason": ai_reason,
                     "note": f"risk_blocked: {reason}"
                 })
-
-                # TEST_MODE：强制打单
-                if TEST_MODE:
-                    progress.warning("TEST_MODE：忽略风控，强制下单最小量")
-                    rule = SYMBOL_RULES[sym]
-                    forced_size = max(float(d.get("size", 0) or 0.0), rule.lot_size_min)
-                    
-                    td[coin]["trade_signal_args"].update({
-                        "signal": side,  # ← 直接用 side（"buy" 或 "sell"）
-                        "quantity": forced_size,
-                        "order_type": "market",
-                        "limit_price": None,
-                        "max_slippage_bps": d.get("max_slippage_bps", 10),
-                        "confidence": d.get("confidence", 0.9),
-                        "profit_target": (d.get("risk") or {}).get("take_profit_pct"),
-                        "stop_loss": (d.get("risk") or {}).get("stop_loss_pct"),
-                        "invalidation_condition": None,
-                        "note": f"force-entry in TEST_MODE (reason={reason})"
-                    })
 
     _save_run_state(st)
 
     # ✅ 把本次决策写入日志
     if isinstance(decision, dict) and "decision" in decision:
         _log_decision_to_csv(decision, meta, market)
+        _log_all_signals_to_csv(td, market)  # <== 新增：记录所有币
         
     progress.success("决策生成完成")
     return td
 
 # --------------------- 主流程（单次执行） ---------------------
-def main_once():
-    market = fetch_market()
-    balance = fetch_balance()
+def main_once(market: dict = None, balance: dict = None): 
+    # ✅ 只在没有传入数据时才获取
+    if market is None:
+        market = fetch_market()
+    if balance is None:
+        balance = fetch_balance()
+    
     decisions = _decisions_from_ai(market, balance)
 
     # === 提取最近一个非 hold 信号（若都 hold，可回退到 BTC）
@@ -671,15 +1132,70 @@ def main_once():
     # === 原有下单桥接 ===
     from bridge_to_flask import route_trading_decisions
     ok, skipped, logged = route_trading_decisions(decisions)
-    print(f"[ai_trader] orders_ok={ok}, skipped={skipped}, logged={logged}")
 
+    # ✅ 传递 market 参数
+    ok, skipped, logged = route_trading_decisions(decisions, market=market)
+    
+    # ✅ 新增：记录活跃持仓
+    if ok > 0:  # 有成功下单
+        positions = []
+        for sym in SYMBOLS:
+            coin = sym.split("-")[0]
+            args = decisions.get(coin, {}).get("trade_signal_args", {})
+            
+            # 只记录 buy/entry 信号
+            if args.get("signal") in ("entry", "buy"):
+                exit_plan = {}
+                if "exit_plan" in decisions.get(coin, {}):
+                    exit_plan = decisions[coin]["exit_plan"]
+                else:
+                    # 从 args 中提取
+                    exit_plan = {
+                        "stop_loss_pct": args.get("stop_loss"),
+                        "take_profit_pct": args.get("take_profit"),
+                        "invalidation_condition": args.get("invalidation_condition", "")
+                    }
+                
+                positions.append({
+                    "symbol": sym,
+                    "side": "buy",
+                    "entry_price": market.get(sym, {}).get("price"),
+                    "size": args.get("quantity"),
+                    "entry_time": datetime.now().isoformat(),
+                    "exit_plan": exit_plan
+                })
+        
+        if positions:
+            from exit_plan_monitor import save_positions
+            save_positions(positions)
+            print(f"✅ 已记录 {len(positions)} 个持仓到监控器")
+    
+    print(f"[ai_trader] orders_ok={ok}, skipped={skipped}, logged={logged}")       
+        
 
 if __name__ == "__main__":
-    BASE_INTERVAL = 30 * 60       # 平均间隔 30 分钟
-    MIN_AI_INTERVAL_SEC = 5 * 60  # 最快 5 分钟
-    MAX_AI_INTERVAL_SEC = 2 * 60 * 60  # 最慢 2 小时
+    # 平衡
+    BASE_INTERVAL = 10 * 60       # 10 分钟 = 600 秒
+    MIN_AI_INTERVAL_SEC = 3 * 60  # 3 分钟 = 180 秒
+    MAX_AI_INTERVAL_SEC = 30 * 60 # 30 分钟 = 1800 秒
+
+
     last_sig = None
     last_call_ts = 0
+
+    # === 打印当前运行模式 ===
+    from urllib.parse import urlparse
+    # 这里假设你 fetch_market() 或 config 里定义了 MARKET_URL
+    MARKET_URL = "http://127.0.0.1:5001/market"  # 若你已有这个变量可删
+    def detect_mode():
+        url = MARKET_URL.lower()
+        if "127.0.0.1" in url or "localhost" in url:
+            return "🧩 当前运行环境：Mock 模式（本地模拟）"
+        elif "okx.com" in url or "binance.com" in url:
+            return "🚀 当前运行环境：实盘模式（交易所 API）"
+        else:
+            return "⚙️ 当前运行环境：未知/测试模式"
+    print(detect_mode())
 
     while True:
         try:
@@ -691,10 +1207,19 @@ if __name__ == "__main__":
             sig = f"{sym}:{side}:{round(score,2)}"
             now = time.time()
 
-            # === 动态计算下次触发间隔（使用 30m + 4h 自适应函数） ===
-            ctx4h = (market.get(sym, {}).get("tf") or {}).get("4h")
+            # ✅ 新增：检测是否有持仓
+            has_position = (_pos_qty(balance, sym) > 0)  # 使用已有的函数
+
+            # ✅ 动态计算下次触发间隔（使用 3m + 30m + 4h 自适应函数）
+            tf = market.get(sym, {}).get("tf", {})
+            ctx3m = tf.get("3m")  # ✅ 新增
+            ctx4h = tf.get("4h")
+
             dyn_interval = _dynamic_ai_interval_secs(
-                market.get(sym, {}), ctx4h, in_pos=False
+                market.get(sym, {}), 
+                ctx4h=ctx4h,
+                ctx3m=ctx3m,  # ✅ 新增参数
+                in_pos=has_position
             )
 
             progress.substep(
@@ -713,7 +1238,7 @@ if __name__ == "__main__":
 
             if need_call and not recently_called:
                 progress.substep("🔔 触发 AI 决策（自适应节奏）")
-                main_once()
+                main_once(market, balance) 
                 last_call_ts = now
                 last_sig = sig
             else:

@@ -1,0 +1,14 @@
+[
+  {
+    "symbol": "BTC-USDT",
+    "side": "buy",
+    "entry_price": 110895.6,
+    "size": 0.0485,
+    "entry_time": "2025-10-29T23:31:19.348698",
+    "exit_plan": {
+      "stop_loss_pct": 0.0247,
+      "take_profit_pct": 0.0494,
+      "invalidation_condition": "无"
+    }
+  }
+]
